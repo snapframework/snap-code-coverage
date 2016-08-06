@@ -1,0 +1,186 @@
+<html><style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE CPP                 #-}
+<span class="lineno">    2 </span>{-# LANGUAGE DeriveDataTypeable  #-}
+<span class="lineno">    3 </span>{-# LANGUAGE OverloadedStrings   #-}
+<span class="lineno">    4 </span>{-# LANGUAGE ScopedTypeVariables #-}
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>------------------------------------------------------------------------------
+<span class="lineno">    7 </span>module Snap.Internal.Http.Server.TLS
+<span class="lineno">    8 </span>  ( TLSException(..)
+<span class="lineno">    9 </span>  , withTLS
+<span class="lineno">   10 </span>  , bindHttps
+<span class="lineno">   11 </span>  , httpsAcceptFunc
+<span class="lineno">   12 </span>  , sendFileFunc
+<span class="lineno">   13 </span>  ) where
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>------------------------------------------------------------------------------
+<span class="lineno">   16 </span>import           Data.ByteString.Char8             (ByteString)
+<span class="lineno">   17 </span>import qualified Data.ByteString.Char8             as S
+<span class="lineno">   18 </span>import           Data.Typeable                     (Typeable)
+<span class="lineno">   19 </span>import           Network.Socket                    (Socket)
+<span class="lineno">   20 </span>#ifdef OPENSSL
+<span class="lineno">   21 </span>import           Control.Exception                 (Exception, bracketOnError, finally, throwIO)
+<span class="lineno">   22 </span>import           Control.Monad                     (when)
+<span class="lineno">   23 </span>import           Data.ByteString.Builder           (byteString)
+<span class="lineno">   24 </span>import qualified Network.Socket                    as Socket
+<span class="lineno">   25 </span>import           OpenSSL                           (withOpenSSL)
+<span class="lineno">   26 </span>import           OpenSSL.Session                   (SSL, SSLContext)
+<span class="lineno">   27 </span>import qualified OpenSSL.Session                   as SSL
+<span class="lineno">   28 </span>import           Prelude                           (Bool, FilePath, IO, Int, Maybe (..), Monad (..), Show, flip, fromIntegral, fst, not, ($), ($!), (.))
+<span class="lineno">   29 </span>import           Snap.Internal.Http.Server.Address (getAddress, getSockAddr)
+<span class="lineno">   30 </span>import           Snap.Internal.Http.Server.Socket  (acceptAndInitialize)
+<span class="lineno">   31 </span>import qualified System.IO.Streams                 as Streams
+<span class="lineno">   32 </span>import qualified System.IO.Streams.SSL             as SStreams
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>#else
+<span class="lineno">   35 </span>import           Control.Exception                 (Exception, throwIO)
+<span class="lineno">   36 </span>import           Prelude                           (Bool, FilePath, IO, Int, Show, id, ($))
+<span class="lineno">   37 </span>#endif
+<span class="lineno">   38 </span>------------------------------------------------------------------------------
+<span class="lineno">   39 </span>import           Snap.Internal.Http.Server.Types   (AcceptFunc (..), SendFileHandler)
+<span class="lineno">   40 </span>------------------------------------------------------------------------------
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>data TLSException = TLSException S.ByteString
+<span class="lineno">   43 </span>  deriving (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span>, <span class="decl"><span class="istickedoff">Typeable</span></span>)
+<span class="lineno">   44 </span>instance Exception TLSException
+<span class="lineno">   45 </span>
+<span class="lineno">   46 </span>#ifndef OPENSSL
+<span class="lineno">   47 </span>type SSLContext = ()
+<span class="lineno">   48 </span>type SSL = ()
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>------------------------------------------------------------------------------
+<span class="lineno">   51 </span>sslNotSupportedException :: TLSException
+<span class="lineno">   52 </span><span class="decl"><span class="istickedoff">sslNotSupportedException = TLSException $ S.concat [</span>
+<span class="lineno">   53 </span><span class="spaces">    </span><span class="istickedoff">&quot;This version of snap-server was not built with SSL &quot;</span>
+<span class="lineno">   54 </span><span class="spaces">  </span><span class="istickedoff">, &quot;support.\n&quot;</span>
+<span class="lineno">   55 </span><span class="spaces">  </span><span class="istickedoff">, &quot;Please compile snap-server with -fopenssl to enable it.&quot;</span>
+<span class="lineno">   56 </span><span class="spaces">  </span><span class="istickedoff">]</span></span>
+<span class="lineno">   57 </span>
+<span class="lineno">   58 </span>
+<span class="lineno">   59 </span>------------------------------------------------------------------------------
+<span class="lineno">   60 </span>withTLS :: IO a -&gt; IO a
+<span class="lineno">   61 </span><span class="decl"><span class="istickedoff">withTLS = id</span></span>
+<span class="lineno">   62 </span>
+<span class="lineno">   63 </span>
+<span class="lineno">   64 </span>------------------------------------------------------------------------------
+<span class="lineno">   65 </span>barf :: IO a
+<span class="lineno">   66 </span><span class="decl"><span class="istickedoff">barf = throwIO sslNotSupportedException</span></span>
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>
+<span class="lineno">   69 </span>------------------------------------------------------------------------------
+<span class="lineno">   70 </span>bindHttps :: ByteString -&gt; Int -&gt; FilePath -&gt; Bool -&gt; FilePath
+<span class="lineno">   71 </span>          -&gt; IO (Socket, SSLContext)
+<span class="lineno">   72 </span><span class="decl"><span class="istickedoff">bindHttps _ _ _ _ _ = barf</span></span>
+<span class="lineno">   73 </span>
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>------------------------------------------------------------------------------
+<span class="lineno">   76 </span>httpsAcceptFunc :: Socket -&gt; SSLContext -&gt; AcceptFunc
+<span class="lineno">   77 </span><span class="decl"><span class="istickedoff">httpsAcceptFunc _ _ = AcceptFunc $ \restore -&gt; restore barf</span></span>
+<span class="lineno">   78 </span>
+<span class="lineno">   79 </span>
+<span class="lineno">   80 </span>------------------------------------------------------------------------------
+<span class="lineno">   81 </span>sendFileFunc :: SSL -&gt; Socket -&gt; SendFileHandler
+<span class="lineno">   82 </span><span class="decl"><span class="istickedoff">sendFileFunc _ _ _ _ _ _ _ = barf</span></span>
+<span class="lineno">   83 </span>
+<span class="lineno">   84 </span>
+<span class="lineno">   85 </span>#else
+<span class="lineno">   86 </span>------------------------------------------------------------------------------
+<span class="lineno">   87 </span>withTLS :: IO a -&gt; IO a
+<span class="lineno">   88 </span>withTLS = withOpenSSL
+<span class="lineno">   89 </span>
+<span class="lineno">   90 </span>
+<span class="lineno">   91 </span>------------------------------------------------------------------------------
+<span class="lineno">   92 </span>bindHttps :: ByteString
+<span class="lineno">   93 </span>          -&gt; Int
+<span class="lineno">   94 </span>          -&gt; FilePath
+<span class="lineno">   95 </span>          -&gt; Bool
+<span class="lineno">   96 </span>          -&gt; FilePath
+<span class="lineno">   97 </span>          -&gt; IO (Socket, SSLContext)
+<span class="lineno">   98 </span>bindHttps bindAddress bindPort cert chainCert key =
+<span class="lineno">   99 </span>    withTLS $
+<span class="lineno">  100 </span>    bracketOnError
+<span class="lineno">  101 </span>        (do (family, addr) &lt;- getSockAddr bindPort bindAddress
+<span class="lineno">  102 </span>            sock &lt;- Socket.socket family Socket.Stream 0
+<span class="lineno">  103 </span>            return (sock, addr)
+<span class="lineno">  104 </span>            )
+<span class="lineno">  105 </span>        (Socket.close . fst)
+<span class="lineno">  106 </span>        $ \(sock, addr) -&gt; do
+<span class="lineno">  107 </span>             Socket.setSocketOption sock Socket.ReuseAddr 1
+<span class="lineno">  108 </span>             Socket.bindSocket sock addr
+<span class="lineno">  109 </span>             Socket.listen sock 150
+<span class="lineno">  110 </span>
+<span class="lineno">  111 </span>             ctx &lt;- SSL.context
+<span class="lineno">  112 </span>             SSL.contextSetPrivateKeyFile ctx key
+<span class="lineno">  113 </span>             if chainCert
+<span class="lineno">  114 </span>               then SSL.contextSetCertificateChainFile ctx cert
+<span class="lineno">  115 </span>               else SSL.contextSetCertificateFile ctx cert
+<span class="lineno">  116 </span>
+<span class="lineno">  117 </span>             certOK &lt;- SSL.contextCheckPrivateKey ctx
+<span class="lineno">  118 </span>             when (not certOK) $ do
+<span class="lineno">  119 </span>                 throwIO $ TLSException certificateError
+<span class="lineno">  120 </span>             return (sock, ctx)
+<span class="lineno">  121 </span>  where
+<span class="lineno">  122 </span>    certificateError =
+<span class="lineno">  123 </span>      &quot;OpenSSL says that the certificate doesn't match the private key!&quot;
+<span class="lineno">  124 </span>
+<span class="lineno">  125 </span>
+<span class="lineno">  126 </span>------------------------------------------------------------------------------
+<span class="lineno">  127 </span>httpsAcceptFunc :: Socket
+<span class="lineno">  128 </span>                -&gt; SSLContext
+<span class="lineno">  129 </span>                -&gt; AcceptFunc
+<span class="lineno">  130 </span>httpsAcceptFunc boundSocket ctx =
+<span class="lineno">  131 </span>    AcceptFunc $ \restore -&gt;
+<span class="lineno">  132 </span>    acceptAndInitialize boundSocket restore $ \(sock, remoteAddr) -&gt; do
+<span class="lineno">  133 </span>        localAddr                &lt;- Socket.getSocketName sock
+<span class="lineno">  134 </span>        (localPort, localHost)   &lt;- getAddress localAddr
+<span class="lineno">  135 </span>        (remotePort, remoteHost) &lt;- getAddress remoteAddr
+<span class="lineno">  136 </span>        ssl                      &lt;- restore (SSL.connection ctx sock)
+<span class="lineno">  137 </span>
+<span class="lineno">  138 </span>        restore (SSL.accept ssl)
+<span class="lineno">  139 </span>        (readEnd, writeEnd) &lt;- SStreams.sslToStreams ssl
+<span class="lineno">  140 </span>
+<span class="lineno">  141 </span>        let cleanup = (do Streams.write Nothing writeEnd
+<span class="lineno">  142 </span>                          SSL.shutdown ssl $! SSL.Unidirectional)
+<span class="lineno">  143 </span>                        `finally` Socket.close sock
+<span class="lineno">  144 </span>
+<span class="lineno">  145 </span>        return $! ( sendFileFunc ssl
+<span class="lineno">  146 </span>                  , localHost
+<span class="lineno">  147 </span>                  , localPort
+<span class="lineno">  148 </span>                  , remoteHost
+<span class="lineno">  149 </span>                  , remotePort
+<span class="lineno">  150 </span>                  , readEnd
+<span class="lineno">  151 </span>                  , writeEnd
+<span class="lineno">  152 </span>                  , cleanup
+<span class="lineno">  153 </span>                  )
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>
+<span class="lineno">  156 </span>------------------------------------------------------------------------------
+<span class="lineno">  157 </span>sendFileFunc :: SSL -&gt; SendFileHandler
+<span class="lineno">  158 </span>sendFileFunc ssl buffer builder fPath offset nbytes = do
+<span class="lineno">  159 </span>    Streams.unsafeWithFileAsInputStartingAt (fromIntegral offset) fPath $ \fileInput0 -&gt; do
+<span class="lineno">  160 </span>        fileInput &lt;- Streams.takeBytes (fromIntegral nbytes) fileInput0 &gt;&gt;=
+<span class="lineno">  161 </span>                     Streams.map byteString
+<span class="lineno">  162 </span>        input     &lt;- Streams.fromList [builder] &gt;&gt;=
+<span class="lineno">  163 </span>                     flip Streams.appendInputStream fileInput
+<span class="lineno">  164 </span>        output    &lt;- Streams.makeOutputStream sendChunk &gt;&gt;=
+<span class="lineno">  165 </span>                     Streams.unsafeBuilderStream (return buffer)
+<span class="lineno">  166 </span>        Streams.supply input output
+<span class="lineno">  167 </span>        Streams.write Nothing output
+<span class="lineno">  168 </span>
+<span class="lineno">  169 </span>  where
+<span class="lineno">  170 </span>    sendChunk (Just s) = SSL.write ssl s
+<span class="lineno">  171 </span>    sendChunk Nothing  = return $! ()
+<span class="lineno">  172 </span>#endif
+
+</pre>
+</html>
