@@ -1,0 +1,71 @@
+<html><style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+<pre>
+<span class="lineno">    1 </span>-- | The Snap.Test module contains primitives and combinators for testing Snap
+<span class="lineno">    2 </span>-- applications.
+<span class="lineno">    3 </span>module Snap.Test
+<span class="lineno">    4 </span>  ( -- * Combinators and types for testing Snap handlers.
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>    -- ** Types
+<span class="lineno">    7 </span>    RequestBuilder
+<span class="lineno">    8 </span>  , MultipartParams
+<span class="lineno">    9 </span>  , MultipartParam(..)
+<span class="lineno">   10 </span>  , FileData      (..)
+<span class="lineno">   11 </span>  , RequestType   (..)
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>    -- ** Building Requests and testing handlers
+<span class="lineno">   14 </span>  , buildRequest
+<span class="lineno">   15 </span>  , runHandler
+<span class="lineno">   16 </span>  , runHandlerM
+<span class="lineno">   17 </span>  , evalHandler
+<span class="lineno">   18 </span>  , evalHandlerM
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>    -- *** Convenience functions for generating common types of HTTP requests
+<span class="lineno">   21 </span>  , get
+<span class="lineno">   22 </span>  , postUrlEncoded
+<span class="lineno">   23 </span>  , postMultipart
+<span class="lineno">   24 </span>  , put
+<span class="lineno">   25 </span>  , postRaw
+<span class="lineno">   26 </span>  , delete
+<span class="lineno">   27 </span>
+<span class="lineno">   28 </span>    -- *** Precise control over building Requests
+<span class="lineno">   29 </span>  , addHeader
+<span class="lineno">   30 </span>  , setContentType
+<span class="lineno">   31 </span>  , setHeader
+<span class="lineno">   32 </span>  , addCookies
+<span class="lineno">   33 </span>  , setHttpVersion
+<span class="lineno">   34 </span>  , setQueryString
+<span class="lineno">   35 </span>  , setQueryStringRaw
+<span class="lineno">   36 </span>  , setRequestPath
+<span class="lineno">   37 </span>  , setRequestType
+<span class="lineno">   38 </span>  , setSecure
+<span class="lineno">   39 </span>
+<span class="lineno">   40 </span>   -- * HUnit Assertions
+<span class="lineno">   41 </span>  , assertSuccess
+<span class="lineno">   42 </span>  , assert404
+<span class="lineno">   43 </span>  , assertRedirectTo
+<span class="lineno">   44 </span>  , assertRedirect
+<span class="lineno">   45 </span>  , assertBodyContains
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>   -- * Getting response bodies
+<span class="lineno">   48 </span>  , getResponseBody
+<span class="lineno">   49 </span>
+<span class="lineno">   50 </span>   -- * Dumping HTTP Messages
+<span class="lineno">   51 </span>  , requestToString
+<span class="lineno">   52 </span>  , responseToString
+<span class="lineno">   53 </span>  )
+<span class="lineno">   54 </span>  where
+<span class="lineno">   55 </span>
+<span class="lineno">   56 </span>import           Snap.Internal.Test.Assertions     (assert404, assertBodyContains, assertRedirect, assertRedirectTo, assertSuccess, getResponseBody)
+<span class="lineno">   57 </span>import           Snap.Internal.Test.RequestBuilder (FileData (..), MultipartParam (..), MultipartParams, RequestBuilder, RequestType (..), addCookies, addHeader, buildRequest, delete, evalHandler, evalHandlerM, get, postMultipart, postRaw, postUrlEncoded, put, requestToString, responseToString, runHandler, runHandlerM, setContentType, setHeader, setHttpVersion, setQueryString, setQueryStringRaw, setRequestPath, setRequestType, setSecure)
+
+</pre>
+</html>

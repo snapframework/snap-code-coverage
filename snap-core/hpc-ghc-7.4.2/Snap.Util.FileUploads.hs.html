@@ -1,0 +1,123 @@
+<html><style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+<pre>
+<span class="lineno">    1 </span>------------------------------------------------------------------------------
+<span class="lineno">    2 </span>-- | This module contains primitives and helper functions for handling
+<span class="lineno">    3 </span>-- requests with @Content-type: multipart/form-data@, i.e. HTML forms and file
+<span class="lineno">    4 </span>-- uploads.
+<span class="lineno">    5 </span>--
+<span class="lineno">    6 </span>-- Typically most users will want to use 'handleFileUploads', which writes
+<span class="lineno">    7 </span>-- uploaded files to a temporary directory before sending them on to a handler
+<span class="lineno">    8 </span>-- specified by the user.
+<span class="lineno">    9 </span>--
+<span class="lineno">   10 </span>-- Users who wish to handle their file uploads differently can use the
+<span class="lineno">   11 </span>-- lower-level interface called 'handleMultipart'. That function takes
+<span class="lineno">   12 </span>-- uploaded files and streams them to a consumer of the user's choosing.
+<span class="lineno">   13 </span>--
+<span class="lineno">   14 </span>-- Using these functions requires making \&quot;policy\&quot; decisions which Snap can't
+<span class="lineno">   15 </span>-- really make for users, such as \&quot;what's the largest PDF file a user is
+<span class="lineno">   16 </span>-- allowed to upload?\&quot; and \&quot;should we read form inputs into the parameters
+<span class="lineno">   17 </span>-- mapping?\&quot;. Policy is specified on a \&quot;global\&quot; basis (using
+<span class="lineno">   18 </span>-- 'UploadPolicy'), and on a per-file basis (using 'PartUploadPolicy', which
+<span class="lineno">   19 </span>-- allows you to reject or limit the size of certain uploaded
+<span class="lineno">   20 </span>-- @Content-type@s).
+<span class="lineno">   21 </span>--
+<span class="lineno">   22 </span>-- Example usage:
+<span class="lineno">   23 </span>--
+<span class="lineno">   24 </span>-- @
+<span class="lineno">   25 </span>-- {-\# LANGUAGE OverloadedStrings #-}
+<span class="lineno">   26 </span>--
+<span class="lineno">   27 </span>-- module Main where
+<span class="lineno">   28 </span>--
+<span class="lineno">   29 </span>-- import qualified Data.ByteString.Char8 as B8
+<span class="lineno">   30 </span>-- import           Data.Functor          ((\&lt;$&gt;))
+<span class="lineno">   31 </span>-- import           &quot;Snap.Core&quot;             ('Snap.Core.Snap', 'Snap.Core.route', 'Snap.Core.writeBS')
+<span class="lineno">   32 </span>-- import           Snap.Http.Server      (quickHttpServe)
+<span class="lineno">   33 </span>-- import           &quot;Snap.Util.FileUploads&quot;
+<span class="lineno">   34 </span>-- import           System.Posix          (FileOffset, fileSize, getFileStatus)
+<span class="lineno">   35 </span>--
+<span class="lineno">   36 </span>-- uploadForm :: 'Snap.Core.Snap' ()
+<span class="lineno">   37 </span>-- uploadForm = 'Snap.Core.writeBS' \&quot;\&lt;form enctype=\\\&quot;multipart\/form-data\\\&quot; action=\\&quot;\/do-upload\\\&quot; method=\\\&quot;POST\\\&quot;&gt;\\
+<span class="lineno">   38 </span>--     \\\&lt;input name=\\\&quot;file\\\&quot; type=\\\&quot;file\\\&quot; \/&gt;\\
+<span class="lineno">   39 </span>--     \\\&lt;input type=\\\&quot;submit\\\&quot; value=\\\&quot;Send File\\\&quot; \/&gt;\\
+<span class="lineno">   40 </span>--     \\\&lt;\/form&gt;\&quot;
+<span class="lineno">   41 </span>--
+<span class="lineno">   42 </span>-- getFileSize :: FilePath -&gt; IO FileOffset
+<span class="lineno">   43 </span>-- getFileSize path = fileSize \&lt;$&gt; getFileStatus path
+<span class="lineno">   44 </span>--
+<span class="lineno">   45 </span>-- -- Upload handler that prints out the uploaded file\'s size.
+<span class="lineno">   46 </span>-- doUpload :: 'Snap.Core.Snap' ()
+<span class="lineno">   47 </span>-- doUpload = do
+<span class="lineno">   48 </span>--   l \&lt;- 'handleFileUploads' \&quot;\/tmp\&quot; 'defaultUploadPolicy'
+<span class="lineno">   49 </span>--        (const $ 'allowWithMaximumSize' ('getMaximumFormInputSize' 'defaultUploadPolicy'))
+<span class="lineno">   50 </span>--        (\\pinfo mbfname -&gt; do fsize \&lt;- either (const $ return 0) getFileSize mbfname
+<span class="lineno">   51 </span>--                              return ('partFileName' pinfo, fsize))
+<span class="lineno">   52 </span>--   'writeBS' . B8.pack . show $ l
+<span class="lineno">   53 </span>--
+<span class="lineno">   54 </span>-- site :: 'Snap.Core.Snap' ()
+<span class="lineno">   55 </span>-- site = 'Snap.Core.route'
+<span class="lineno">   56 </span>--   [ (\&quot;\/upload\&quot;,    uploadForm)
+<span class="lineno">   57 </span>--   , (\&quot;\/do-upload\&quot;, doUpload)]
+<span class="lineno">   58 </span>--
+<span class="lineno">   59 </span>-- main :: IO ()
+<span class="lineno">   60 </span>-- main = quickHttpServe site
+<span class="lineno">   61 </span>-- @
+<span class="lineno">   62 </span>module Snap.Util.FileUploads
+<span class="lineno">   63 </span>  ( -- * Functions
+<span class="lineno">   64 </span>    handleFileUploads
+<span class="lineno">   65 </span>  , handleMultipart
+<span class="lineno">   66 </span>  , PartProcessor
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>    -- * Uploaded parts
+<span class="lineno">   69 </span>  , PartInfo
+<span class="lineno">   70 </span>  , PartDisposition(..)
+<span class="lineno">   71 </span>  , partFieldName
+<span class="lineno">   72 </span>  , partFileName
+<span class="lineno">   73 </span>  , partContentType
+<span class="lineno">   74 </span>  , partHeaders
+<span class="lineno">   75 </span>  , partDisposition
+<span class="lineno">   76 </span>
+<span class="lineno">   77 </span>    -- ** Policy
+<span class="lineno">   78 </span>    -- *** General upload policy
+<span class="lineno">   79 </span>  , UploadPolicy
+<span class="lineno">   80 </span>  , defaultUploadPolicy
+<span class="lineno">   81 </span>  , doProcessFormInputs
+<span class="lineno">   82 </span>  , setProcessFormInputs
+<span class="lineno">   83 </span>  , getMaximumFormInputSize
+<span class="lineno">   84 </span>  , setMaximumFormInputSize
+<span class="lineno">   85 </span>  , getMaximumNumberOfFormInputs
+<span class="lineno">   86 </span>  , setMaximumNumberOfFormInputs
+<span class="lineno">   87 </span>  , getMinimumUploadRate
+<span class="lineno">   88 </span>  , setMinimumUploadRate
+<span class="lineno">   89 </span>  , getMinimumUploadSeconds
+<span class="lineno">   90 </span>  , setMinimumUploadSeconds
+<span class="lineno">   91 </span>  , getUploadTimeout
+<span class="lineno">   92 </span>  , setUploadTimeout
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>    -- *** Per-file upload policy
+<span class="lineno">   95 </span>  , PartUploadPolicy
+<span class="lineno">   96 </span>  , disallow
+<span class="lineno">   97 </span>  , allowWithMaximumSize
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>    -- * Exceptions
+<span class="lineno">  100 </span>  , FileUploadException
+<span class="lineno">  101 </span>  , fileUploadExceptionReason
+<span class="lineno">  102 </span>  , BadPartException
+<span class="lineno">  103 </span>  , badPartExceptionReason
+<span class="lineno">  104 </span>  , PolicyViolationException
+<span class="lineno">  105 </span>  , policyViolationExceptionReason
+<span class="lineno">  106 </span>  ) where
+<span class="lineno">  107 </span>
+<span class="lineno">  108 </span>
+<span class="lineno">  109 </span>import           Snap.Internal.Util.FileUploads (BadPartException (badPartExceptionReason), FileUploadException, PartDisposition (..), PartInfo (..), PartProcessor, PartUploadPolicy, PolicyViolationException (policyViolationExceptionReason), UploadPolicy, allowWithMaximumSize, defaultUploadPolicy, disallow, doProcessFormInputs, fileUploadExceptionReason, getMaximumFormInputSize, getMaximumNumberOfFormInputs, getMinimumUploadRate, getMinimumUploadSeconds, getUploadTimeout, handleFileUploads, handleMultipart, setMaximumFormInputSize, setMaximumNumberOfFormInputs, setMinimumUploadRate, setMinimumUploadSeconds, setProcessFormInputs, setUploadTimeout)
+
+</pre>
+</html>
