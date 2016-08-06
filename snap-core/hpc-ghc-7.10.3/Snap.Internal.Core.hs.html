@@ -1529,7 +1529,7 @@ span.spaces    { background: white }
 <span class="lineno"> 1513 </span><span class="spaces">    </span><span class="istickedoff">headerContents &lt;- getHeader header &lt;$&gt; getRequest</span>
 <span class="lineno"> 1514 </span><span class="spaces"></span><span class="istickedoff"></span>
 <span class="lineno"> 1515 </span><span class="spaces">    </span><span class="istickedoff">let whitespace = [ ' ', '\t', '\r', '\n' ]</span>
-<span class="lineno"> 1516 </span><span class="spaces">        </span><span class="istickedoff">ipChrs = [ '.', '0', '1', '2', '3', '4', <span class="nottickedoff">'5'</span>, <span class="nottickedoff">'6'</span>, <span class="nottickedoff">'7'</span>, <span class="nottickedoff">'8'</span>, <span class="nottickedoff">'9'</span> ]</span>
+<span class="lineno"> 1516 </span><span class="spaces">        </span><span class="istickedoff">ipChrs = '.' : &quot;0123456789&quot;</span>
 <span class="lineno"> 1517 </span><span class="spaces">        </span><span class="istickedoff">trim f s = f (`elem` s)</span>
 <span class="lineno"> 1518 </span><span class="spaces"></span><span class="istickedoff"></span>
 <span class="lineno"> 1519 </span><span class="spaces">        </span><span class="istickedoff">clean = trim S.takeWhile ipChrs . trim S.dropWhile whitespace</span>
