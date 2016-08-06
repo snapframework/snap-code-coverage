@@ -1,0 +1,60 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=ANSI_X3.4-1968">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE BangPatterns #-}
+<span class="lineno">    2 </span>{-# LANGUAGE CPP          #-}
+<span class="lineno">    3 </span>
+<span class="lineno">    4 </span>module Snap.Internal.Http.Server.Common
+<span class="lineno">    5 </span>  ( atomicModifyIORef'
+<span class="lineno">    6 </span>  , eatException
+<span class="lineno">    7 </span>  ) where
+<span class="lineno">    8 </span>
+<span class="lineno">    9 </span>import           Control.Exception (SomeException, catch)
+<span class="lineno">   10 </span>import           Control.Monad     (void)
+<span class="lineno">   11 </span>import           Prelude           (IO, return, ($!))
+<span class="lineno">   12 </span>
+<span class="lineno">   13 </span>#if MIN_VERSION_base(4,6,0)
+<span class="lineno">   14 </span>------------------------------------------------------------------------------
+<span class="lineno">   15 </span>import           Data.IORef        (atomicModifyIORef')
+<span class="lineno">   16 </span>
+<span class="lineno">   17 </span>#else
+<span class="lineno">   18 </span>------------------------------------------------------------------------------
+<span class="lineno">   19 </span>import           Data.IORef        (IORef, atomicModifyIORef)
+<span class="lineno">   20 </span>import           Prelude           (seq)
+<span class="lineno">   21 </span>
+<span class="lineno">   22 </span>
+<span class="lineno">   23 </span>------------------------------------------------------------------------------
+<span class="lineno">   24 </span>-- | Strict version of 'atomicModifyIORef'.  This forces both the value stored
+<span class="lineno">   25 </span>-- in the 'IORef' as well as the value returned.
+<span class="lineno">   26 </span>atomicModifyIORef' :: IORef a -&gt; (a -&gt; (a,b)) -&gt; IO b
+<span class="lineno">   27 </span>atomicModifyIORef' ref f = do
+<span class="lineno">   28 </span>    b &lt;- atomicModifyIORef ref
+<span class="lineno">   29 </span>            (\x -&gt; let (a, b) = f x
+<span class="lineno">   30 </span>                    in (a, a `seq` b))
+<span class="lineno">   31 </span>    b `seq` return b
+<span class="lineno">   32 </span>#endif
+<span class="lineno">   33 </span>
+<span class="lineno">   34 </span>
+<span class="lineno">   35 </span>------------------------------------------------------------------------------
+<span class="lineno">   36 </span>eatException :: IO a -&gt; IO ()
+<span class="lineno">   37 </span><span class="decl"><span class="istickedoff">eatException m = void m `catch` f</span>
+<span class="lineno">   38 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   39 </span><span class="spaces">    </span><span class="istickedoff">f :: SomeException -&gt; IO ()</span>
+<span class="lineno">   40 </span><span class="spaces">    </span><span class="istickedoff">f !_ = return $! ()</span></span>
+
+</pre>
+</body>
+</html>
