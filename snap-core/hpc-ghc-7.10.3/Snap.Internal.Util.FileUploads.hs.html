@@ -1,0 +1,816 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=ANSI_X3.4-1968">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE BangPatterns              #-}
+<span class="lineno">    2 </span>{-# LANGUAGE CPP                       #-}
+<span class="lineno">    3 </span>{-# LANGUAGE DeriveDataTypeable        #-}
+<span class="lineno">    4 </span>{-# LANGUAGE ExistentialQuantification #-}
+<span class="lineno">    5 </span>{-# LANGUAGE FlexibleContexts          #-}
+<span class="lineno">    6 </span>{-# LANGUAGE OverloadedStrings         #-}
+<span class="lineno">    7 </span>{-# LANGUAGE ScopedTypeVariables       #-}
+<span class="lineno">    8 </span>
+<span class="lineno">    9 </span>module Snap.Internal.Util.FileUploads
+<span class="lineno">   10 </span>  ( -- * Functions
+<span class="lineno">   11 </span>    handleFileUploads
+<span class="lineno">   12 </span>  , handleMultipart
+<span class="lineno">   13 </span>  , PartProcessor
+<span class="lineno">   14 </span>
+<span class="lineno">   15 </span>    -- * Uploaded parts
+<span class="lineno">   16 </span>  , PartInfo(..)
+<span class="lineno">   17 </span>  , PartDisposition(..)
+<span class="lineno">   18 </span>  , toPartDisposition
+<span class="lineno">   19 </span>
+<span class="lineno">   20 </span>    -- ** Policy
+<span class="lineno">   21 </span>    -- *** General upload policy
+<span class="lineno">   22 </span>  , UploadPolicy(..)
+<span class="lineno">   23 </span>  , defaultUploadPolicy
+<span class="lineno">   24 </span>  , doProcessFormInputs
+<span class="lineno">   25 </span>  , setProcessFormInputs
+<span class="lineno">   26 </span>  , getMaximumFormInputSize
+<span class="lineno">   27 </span>  , setMaximumFormInputSize
+<span class="lineno">   28 </span>  , getMaximumNumberOfFormInputs
+<span class="lineno">   29 </span>  , setMaximumNumberOfFormInputs
+<span class="lineno">   30 </span>  , getMinimumUploadRate
+<span class="lineno">   31 </span>  , setMinimumUploadRate
+<span class="lineno">   32 </span>  , getMinimumUploadSeconds
+<span class="lineno">   33 </span>  , setMinimumUploadSeconds
+<span class="lineno">   34 </span>  , getUploadTimeout
+<span class="lineno">   35 </span>  , setUploadTimeout
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>    -- *** Per-file upload policy
+<span class="lineno">   38 </span>  , PartUploadPolicy(..)
+<span class="lineno">   39 </span>  , disallow
+<span class="lineno">   40 </span>  , allowWithMaximumSize
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>    -- * Exceptions
+<span class="lineno">   43 </span>  , FileUploadException(..)
+<span class="lineno">   44 </span>  , fileUploadExceptionReason
+<span class="lineno">   45 </span>  , BadPartException(..)
+<span class="lineno">   46 </span>  , PolicyViolationException(..)
+<span class="lineno">   47 </span>  ) where
+<span class="lineno">   48 </span>
+<span class="lineno">   49 </span>------------------------------------------------------------------------------
+<span class="lineno">   50 </span>import           Control.Applicative              (Alternative ((&lt;|&gt;)), Applicative ((*&gt;), (&lt;*), pure))
+<span class="lineno">   51 </span>import           Control.Arrow                    (Arrow (first))
+<span class="lineno">   52 </span>import           Control.Exception.Lifted         (Exception, SomeException (..), bracket, catch, fromException, mask, throwIO, toException)
+<span class="lineno">   53 </span>import qualified Control.Exception.Lifted         as E (try)
+<span class="lineno">   54 </span>import           Control.Monad                    (Functor (fmap), Monad ((&gt;&gt;=), return), MonadPlus (mzero), guard, liftM, sequence, void, when, (&gt;=&gt;))
+<span class="lineno">   55 </span>import           Data.Attoparsec.ByteString.Char8 (Parser, isEndOfLine, string, takeWhile)
+<span class="lineno">   56 </span>import qualified Data.Attoparsec.ByteString.Char8 as Atto (try)
+<span class="lineno">   57 </span>import           Data.ByteString.Char8            (ByteString)
+<span class="lineno">   58 </span>import qualified Data.ByteString.Char8            as S
+<span class="lineno">   59 </span>import           Data.ByteString.Internal         (c2w)
+<span class="lineno">   60 </span>import qualified Data.CaseInsensitive             as CI (mk)
+<span class="lineno">   61 </span>import           Data.Int                         (Int, Int64)
+<span class="lineno">   62 </span>import           Data.List                        (concat, find, map, (++))
+<span class="lineno">   63 </span>import qualified Data.Map                         as Map (insertWith', size)
+<span class="lineno">   64 </span>import           Data.Maybe                       (Maybe (..), fromMaybe, isJust, maybe)
+<span class="lineno">   65 </span>import           Data.Text                        (Text)
+<span class="lineno">   66 </span>import qualified Data.Text                        as T (concat, pack, unpack)
+<span class="lineno">   67 </span>import qualified Data.Text.Encoding               as TE (decodeUtf8)
+<span class="lineno">   68 </span>import           Data.Typeable                    (Typeable, cast)
+<span class="lineno">   69 </span>import           Prelude                          (Bool (..), Double, Either (..), Eq (..), FilePath, IO, Ord (..), Show (..), String, const, either, flip, fst, id, max, not, otherwise, snd, ($), ($!), (.), (^), (||))
+<span class="lineno">   70 </span>import           Snap.Core                        (HasHeaders (headers), Headers, MonadSnap, Request (rqParams, rqPostParams), getHeader, getRequest, getTimeoutModifier, putRequest, runRequestBody)
+<span class="lineno">   71 </span>import           Snap.Internal.Parsing            (crlf, fullyParse, pContentTypeWithParameters, pHeaders, pValueWithParameters)
+<span class="lineno">   72 </span>import qualified Snap.Types.Headers               as H (fromList)
+<span class="lineno">   73 </span>import           System.Directory                 (removeFile)
+<span class="lineno">   74 </span>import           System.FilePath                  ((&lt;/&gt;))
+<span class="lineno">   75 </span>import           System.IO                        (BufferMode (NoBuffering), Handle, hClose, hSetBuffering)
+<span class="lineno">   76 </span>import           System.IO.Streams                (InputStream, MatchInfo (..), TooManyBytesReadException, search)
+<span class="lineno">   77 </span>import qualified System.IO.Streams                as Streams
+<span class="lineno">   78 </span>import           System.IO.Streams.Attoparsec     (parseFromStream)
+<span class="lineno">   79 </span>import           System.PosixCompat.Temp          (mkstemp)
+<span class="lineno">   80 </span>------------------------------------------------------------------------------
+<span class="lineno">   81 </span>
+<span class="lineno">   82 </span>------------------------------------------------------------------------------
+<span class="lineno">   83 </span>-- | Reads uploaded files into a temporary directory and calls a user handler
+<span class="lineno">   84 </span>-- to process them.
+<span class="lineno">   85 </span>--
+<span class="lineno">   86 </span>-- Note: /THE REQUEST MUST BE CORRECTLY ENCODED/. If the request's
+<span class="lineno">   87 </span>-- @Content-type@ is not \&quot;@multipart/formdata@\&quot;, this function skips
+<span class="lineno">   88 </span>-- processing using 'pass'.
+<span class="lineno">   89 </span>--
+<span class="lineno">   90 </span>-- Given a temporary directory, global and file-specific upload policies, and a
+<span class="lineno">   91 </span>-- user handler, this function consumes a request body uploaded with
+<span class="lineno">   92 </span>-- @Content-type: multipart/form-data@. Each file is read into the temporary
+<span class="lineno">   93 </span>-- directory, and is then passed to the user handler. After the user handler
+<span class="lineno">   94 </span>-- runs (but before the 'Response' body is streamed to the client), the files
+<span class="lineno">   95 </span>-- are deleted from disk; so if you want to retain or use the uploaded files in
+<span class="lineno">   96 </span>-- the generated response, you need to move or otherwise process them.
+<span class="lineno">   97 </span>--
+<span class="lineno">   98 </span>-- The argument passed to the user handler is a tuple:
+<span class="lineno">   99 </span>--
+<span class="lineno">  100 </span>-- &gt; (PartInfo, Either PolicyViolationException FilePath)
+<span class="lineno">  101 </span>--
+<span class="lineno">  102 </span>-- The first half of this tuple is a 'PartInfo', which contains the
+<span class="lineno">  103 </span>-- information the client browser sent about the given upload part (like
+<span class="lineno">  104 </span>-- filename, content-type, etc). The second half of this tuple is an 'Either'
+<span class="lineno">  105 </span>-- stipulating that either:
+<span class="lineno">  106 </span>--
+<span class="lineno">  107 </span>-- 1. the file was rejected on a policy basis because of the provided
+<span class="lineno">  108 </span>--    'PartUploadPolicy' handler
+<span class="lineno">  109 </span>--
+<span class="lineno">  110 </span>-- 2. the file was accepted and exists at the given path.
+<span class="lineno">  111 </span>--
+<span class="lineno">  112 </span>-- /Exceptions/
+<span class="lineno">  113 </span>--
+<span class="lineno">  114 </span>-- If the client's upload rate passes below the configured minimum (see
+<span class="lineno">  115 </span>-- 'setMinimumUploadRate' and 'setMinimumUploadSeconds'), this function
+<span class="lineno">  116 </span>-- terminates the connection. This setting is there to protect the server
+<span class="lineno">  117 </span>-- against slowloris-style denial of service attacks.
+<span class="lineno">  118 </span>--
+<span class="lineno">  119 </span>-- If the given 'UploadPolicy' stipulates that you wish form inputs to be
+<span class="lineno">  120 </span>-- placed in the 'rqParams' parameter map (using 'setProcessFormInputs'), and
+<span class="lineno">  121 </span>-- a form input exceeds the maximum allowable size, this function will throw a
+<span class="lineno">  122 </span>-- 'PolicyViolationException'.
+<span class="lineno">  123 </span>--
+<span class="lineno">  124 </span>-- If an uploaded part contains MIME headers longer than a fixed internal
+<span class="lineno">  125 </span>-- threshold (currently 32KB), this function will throw a 'BadPartException'.
+<span class="lineno">  126 </span>
+<span class="lineno">  127 </span>handleFileUploads ::
+<span class="lineno">  128 </span>       (MonadSnap m) =&gt;
+<span class="lineno">  129 </span>       FilePath                       -- ^ temporary directory
+<span class="lineno">  130 </span>    -&gt; UploadPolicy                   -- ^ general upload policy
+<span class="lineno">  131 </span>    -&gt; (PartInfo -&gt; PartUploadPolicy) -- ^ per-part upload policy
+<span class="lineno">  132 </span>    -&gt; (PartInfo -&gt; Either PolicyViolationException FilePath -&gt; IO a)
+<span class="lineno">  133 </span>                                      -- ^ user handler (see function
+<span class="lineno">  134 </span>                                      -- description)
+<span class="lineno">  135 </span>    -&gt; m [a]
+<span class="lineno">  136 </span><span class="decl"><span class="istickedoff">handleFileUploads tmpdir uploadPolicy partPolicy partHandler =</span>
+<span class="lineno">  137 </span><span class="spaces">    </span><span class="istickedoff">handleMultipart uploadPolicy go</span>
+<span class="lineno">  138 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  139 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  140 </span><span class="spaces">    </span><span class="istickedoff">go partInfo stream = maybe disallowed takeIt mbFs</span>
+<span class="lineno">  141 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  142 </span><span class="spaces">        </span><span class="istickedoff">ctText = partContentType partInfo</span>
+<span class="lineno">  143 </span><span class="spaces">        </span><span class="istickedoff">fnText = fromMaybe &quot;&quot; $ partFileName partInfo</span>
+<span class="lineno">  144 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  145 </span><span class="spaces">        </span><span class="istickedoff">ct = TE.decodeUtf8 ctText</span>
+<span class="lineno">  146 </span><span class="spaces">        </span><span class="istickedoff">fn = TE.decodeUtf8 fnText</span>
+<span class="lineno">  147 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  148 </span><span class="spaces">        </span><span class="istickedoff">(PartUploadPolicy mbFs) = partPolicy partInfo</span>
+<span class="lineno">  149 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  150 </span><span class="spaces">        </span><span class="istickedoff">takeIt maxSize = do</span>
+<span class="lineno">  151 </span><span class="spaces">            </span><span class="istickedoff">str' &lt;- Streams.throwIfProducesMoreThan maxSize stream</span>
+<span class="lineno">  152 </span><span class="spaces">            </span><span class="istickedoff">fileReader tmpdir partHandler partInfo str' `catch` tooMany maxSize</span>
+<span class="lineno">  153 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  154 </span><span class="spaces">        </span><span class="istickedoff">tooMany maxSize (_ :: TooManyBytesReadException) = do</span>
+<span class="lineno">  155 </span><span class="spaces">            </span><span class="istickedoff">partHandler partInfo</span>
+<span class="lineno">  156 </span><span class="spaces">                        </span><span class="istickedoff">(Left $</span>
+<span class="lineno">  157 </span><span class="spaces">                         </span><span class="istickedoff">PolicyViolationException $</span>
+<span class="lineno">  158 </span><span class="spaces">                         </span><span class="istickedoff">T.concat [ &quot;File \&quot;&quot;</span>
+<span class="lineno">  159 </span><span class="spaces">                                  </span><span class="istickedoff">, fn</span>
+<span class="lineno">  160 </span><span class="spaces">                                  </span><span class="istickedoff">, &quot;\&quot; exceeded maximum allowable size &quot;</span>
+<span class="lineno">  161 </span><span class="spaces">                                  </span><span class="istickedoff">, T.pack $ show maxSize ])</span>
+<span class="lineno">  162 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  163 </span><span class="spaces">        </span><span class="istickedoff">disallowed =</span>
+<span class="lineno">  164 </span><span class="spaces">            </span><span class="istickedoff">partHandler partInfo</span>
+<span class="lineno">  165 </span><span class="spaces">                        </span><span class="istickedoff">(Left $</span>
+<span class="lineno">  166 </span><span class="spaces">                         </span><span class="istickedoff">PolicyViolationException $</span>
+<span class="lineno">  167 </span><span class="spaces">                         </span><span class="istickedoff">T.concat [ &quot;Policy disallowed upload of file \&quot;&quot;</span>
+<span class="lineno">  168 </span><span class="spaces">                                  </span><span class="istickedoff">, fn</span>
+<span class="lineno">  169 </span><span class="spaces">                                  </span><span class="istickedoff">, &quot;\&quot; with content-type \&quot;&quot;</span>
+<span class="lineno">  170 </span><span class="spaces">                                  </span><span class="istickedoff">, ct</span>
+<span class="lineno">  171 </span><span class="spaces">                                  </span><span class="istickedoff">, &quot;\&quot;&quot; ] )</span></span>
+<span class="lineno">  172 </span>
+<span class="lineno">  173 </span>
+<span class="lineno">  174 </span>------------------------------------------------------------------------------
+<span class="lineno">  175 </span>-- | A type alias for a function that will process one of the parts of a
+<span class="lineno">  176 </span>-- @multipart/form-data@ HTTP request body.
+<span class="lineno">  177 </span>type PartProcessor a = PartInfo -&gt; InputStream ByteString -&gt; IO a
+<span class="lineno">  178 </span>
+<span class="lineno">  179 </span>
+<span class="lineno">  180 </span>------------------------------------------------------------------------------
+<span class="lineno">  181 </span>-- | Given an upload policy and a function to consume uploaded \&quot;parts\&quot;,
+<span class="lineno">  182 </span>-- consume a request body uploaded with @Content-type: multipart/form-data@.
+<span class="lineno">  183 </span>--
+<span class="lineno">  184 </span>-- Note: /THE REQUEST MUST BE CORRECTLY ENCODED/. If the request's
+<span class="lineno">  185 </span>-- @Content-type@ is not \&quot;@multipart/formdata@\&quot;, this function skips
+<span class="lineno">  186 </span>-- processing using 'pass'.
+<span class="lineno">  187 </span>--
+<span class="lineno">  188 </span>-- Most users will opt for the higher-level 'handleFileUploads', which writes
+<span class="lineno">  189 </span>-- to temporary files, rather than 'handleMultipart'. This function should be
+<span class="lineno">  190 </span>-- chosen, however, if you need to stream uploaded files directly to your own
+<span class="lineno">  191 </span>-- processing function: e.g. to a database or a remote service via RPC.
+<span class="lineno">  192 </span>--
+<span class="lineno">  193 </span>-- If the client's upload rate passes below the configured minimum (see
+<span class="lineno">  194 </span>-- 'setMinimumUploadRate' and 'setMinimumUploadSeconds'), this function
+<span class="lineno">  195 </span>-- terminates the connection. This setting is there to protect the server
+<span class="lineno">  196 </span>-- against slowloris-style denial of service attacks.
+<span class="lineno">  197 </span>--
+<span class="lineno">  198 </span>-- /Exceptions/
+<span class="lineno">  199 </span>--
+<span class="lineno">  200 </span>-- If the given 'UploadPolicy' stipulates that you wish form inputs to be
+<span class="lineno">  201 </span>-- placed in the 'rqParams' parameter map (using 'setProcessFormInputs'), and
+<span class="lineno">  202 </span>-- a form input exceeds the maximum allowable size, this function will throw a
+<span class="lineno">  203 </span>-- 'PolicyViolationException'.
+<span class="lineno">  204 </span>--
+<span class="lineno">  205 </span>-- If an uploaded part contains MIME headers longer than a fixed internal
+<span class="lineno">  206 </span>-- threshold (currently 32KB), this function will throw a 'BadPartException'.
+<span class="lineno">  207 </span>--
+<span class="lineno">  208 </span>handleMultipart ::
+<span class="lineno">  209 </span>       (MonadSnap m) =&gt;
+<span class="lineno">  210 </span>       UploadPolicy        -- ^ global upload policy
+<span class="lineno">  211 </span>    -&gt; PartProcessor a     -- ^ part processor
+<span class="lineno">  212 </span>    -&gt; m [a]
+<span class="lineno">  213 </span><span class="decl"><span class="istickedoff">handleMultipart uploadPolicy origPartHandler = do</span>
+<span class="lineno">  214 </span><span class="spaces">    </span><span class="istickedoff">hdrs &lt;- liftM headers getRequest</span>
+<span class="lineno">  215 </span><span class="spaces">    </span><span class="istickedoff">let (ct, mbBoundary) = getContentType hdrs</span>
+<span class="lineno">  216 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  217 </span><span class="spaces">    </span><span class="istickedoff">tickleTimeout &lt;- liftM (. max) getTimeoutModifier</span>
+<span class="lineno">  218 </span><span class="spaces">    </span><span class="istickedoff">let bumpTimeout = tickleTimeout $ uploadTimeout uploadPolicy</span>
+<span class="lineno">  219 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  220 </span><span class="spaces">    </span><span class="istickedoff">let partHandler = if doProcessFormInputs uploadPolicy</span>
+<span class="lineno">  221 </span><span class="spaces">                        </span><span class="istickedoff">then captureVariableOrReadFile</span>
+<span class="lineno">  222 </span><span class="spaces">                                 </span><span class="istickedoff">(getMaximumFormInputSize uploadPolicy)</span>
+<span class="lineno">  223 </span><span class="spaces">                                 </span><span class="istickedoff">origPartHandler</span>
+<span class="lineno">  224 </span><span class="spaces">                        </span><span class="istickedoff">else \x y -&gt; liftM File $ origPartHandler x y</span>
+<span class="lineno">  225 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">-- not well-formed multipart? bomb out.</span>
+<span class="lineno">  227 </span><span class="spaces">    </span><span class="istickedoff">guard (ct == &quot;multipart/form-data&quot;)</span>
+<span class="lineno">  228 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  229 </span><span class="spaces">    </span><span class="istickedoff">boundary &lt;- maybe (throwIO $ BadPartException</span>
+<span class="lineno">  230 </span><span class="spaces">                       </span><span class="istickedoff">&quot;got multipart/form-data without boundary&quot;)</span>
+<span class="lineno">  231 </span><span class="spaces">                      </span><span class="istickedoff">return</span>
+<span class="lineno">  232 </span><span class="spaces">                      </span><span class="istickedoff">mbBoundary</span>
+<span class="lineno">  233 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  234 </span><span class="spaces">    </span><span class="istickedoff">-- RateTooSlowException will be caught and properly dealt with by</span>
+<span class="lineno">  235 </span><span class="spaces">    </span><span class="istickedoff">-- runRequestBody</span>
+<span class="lineno">  236 </span><span class="spaces">    </span><span class="istickedoff">captures &lt;- runRequestBody (proc bumpTimeout boundary partHandler)</span>
+<span class="lineno">  237 </span><span class="spaces">    </span><span class="istickedoff">procCaptures captures id</span>
+<span class="lineno">  238 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  239 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  241 </span><span class="spaces">    </span><span class="istickedoff">uploadRate  = minimumUploadRate uploadPolicy</span>
+<span class="lineno">  242 </span><span class="spaces">    </span><span class="istickedoff">uploadSecs  = minimumUploadSeconds uploadPolicy</span>
+<span class="lineno">  243 </span><span class="spaces">    </span><span class="istickedoff">maxFormVars = maximumNumberOfFormInputs uploadPolicy</span>
+<span class="lineno">  244 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  245 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  246 </span><span class="spaces">    </span><span class="istickedoff">proc bumpTimeout boundary partHandler =</span>
+<span class="lineno">  247 </span><span class="spaces">        </span><span class="istickedoff">Streams.throwIfTooSlow bumpTimeout uploadRate uploadSecs &gt;=&gt;</span>
+<span class="lineno">  248 </span><span class="spaces">        </span><span class="istickedoff">internalHandleMultipart boundary partHandler</span>
+<span class="lineno">  249 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  250 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  251 </span><span class="spaces">    </span><span class="istickedoff">procCaptures []                 dl = return $! dl []</span>
+<span class="lineno">  252 </span><span class="spaces">    </span><span class="istickedoff">procCaptures ((File x):xs)      dl = procCaptures xs (dl . (x:))</span>
+<span class="lineno">  253 </span><span class="spaces">    </span><span class="istickedoff">procCaptures ((Capture k v):xs) dl = do</span>
+<span class="lineno">  254 </span><span class="spaces">        </span><span class="istickedoff">rq &lt;- getRequest</span>
+<span class="lineno">  255 </span><span class="spaces">        </span><span class="istickedoff">when (Map.size (rqPostParams rq) &gt;= maxFormVars)</span>
+<span class="lineno">  256 </span><span class="spaces">          </span><span class="istickedoff">$ throwIO . PolicyViolationException</span>
+<span class="lineno">  257 </span><span class="spaces">          </span><span class="istickedoff">$ T.concat [ &quot;number of form inputs exceeded maximum of &quot;</span>
+<span class="lineno">  258 </span><span class="spaces">                     </span><span class="istickedoff">, T.pack $ show maxFormVars ]</span>
+<span class="lineno">  259 </span><span class="spaces">        </span><span class="istickedoff">putRequest $ modifyParams (ins k v) rq</span>
+<span class="lineno">  260 </span><span class="spaces">        </span><span class="istickedoff">procCaptures xs dl</span>
+<span class="lineno">  261 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  262 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  263 </span><span class="spaces">    </span><span class="istickedoff">ins k v = Map.insertWith' (flip (++)) k [v]</span>
+<span class="lineno">  264 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  265 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  266 </span><span class="spaces">    </span><span class="istickedoff">modifyParams f r = r { rqPostParams = f $ rqPostParams r</span>
+<span class="lineno">  267 </span><span class="spaces">                         </span><span class="istickedoff">, rqParams     = f $ rqParams r</span>
+<span class="lineno">  268 </span><span class="spaces">                         </span><span class="istickedoff">}</span></span>
+<span class="lineno">  269 </span>
+<span class="lineno">  270 </span>
+<span class="lineno">  271 </span>------------------------------------------------------------------------------
+<span class="lineno">  272 </span>-- | Represents the disposition type specified via the @Content-Disposition@
+<span class="lineno">  273 </span>-- header field. See &lt;https://www.ietf.org/rfc/rfc1806.txt RFC 1806&gt;.
+<span class="lineno">  274 </span>data PartDisposition =
+<span class="lineno">  275 </span>    DispositionAttachment       -- ^ @Content-Disposition: attachment@.
+<span class="lineno">  276 </span>  | DispositionFile             -- ^ @Content-Disposition: file@.
+<span class="lineno">  277 </span>  | DispositionFormData         -- ^ @Content-Disposition: form-data@.
+<span class="lineno">  278 </span>  | DispositionOther ByteString -- ^ Any other value.
+<span class="lineno">  279 </span>  deriving (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Eq</span></span></span></span>, <span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span>)
+<span class="lineno">  280 </span>
+<span class="lineno">  281 </span>
+<span class="lineno">  282 </span>------------------------------------------------------------------------------
+<span class="lineno">  283 </span>-- | 'PartInfo' contains information about a \&quot;part\&quot; in a request uploaded
+<span class="lineno">  284 </span>-- with @Content-type: multipart/form-data@.
+<span class="lineno">  285 </span>data PartInfo =
+<span class="lineno">  286 </span>  PartInfo
+<span class="lineno">  287 </span>  { <span class="istickedoff"><span class="decl"><span class="istickedoff">partFieldName</span></span></span>   :: !ByteString
+<span class="lineno">  288 </span>    -- ^ Field name associated with this part (i.e., the name specified with
+<span class="lineno">  289 </span>    -- @\&lt;input name=\&quot;partFieldName\&quot; ...@).
+<span class="lineno">  290 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">partFileName</span></span></span>    :: !(Maybe ByteString)
+<span class="lineno">  291 </span>    -- ^ Name of the uploaded file.
+<span class="lineno">  292 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">partContentType</span></span></span> :: !ByteString
+<span class="lineno">  293 </span>    -- ^ Content type of this part.
+<span class="lineno">  294 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">partDisposition</span></span></span> :: !PartDisposition
+<span class="lineno">  295 </span>    -- ^ Disposition type of this part. See 'PartDisposition'.
+<span class="lineno">  296 </span>  , <span class="istickedoff"><span class="decl"><span class="istickedoff">partHeaders</span></span></span>     :: !(Headers)
+<span class="lineno">  297 </span>    -- ^ Remaining headers associated with this part.
+<span class="lineno">  298 </span>  }
+<span class="lineno">  299 </span>  deriving (<span class="decl"><span class="istickedoff"><span class="decl"><span class="istickedoff">Show</span></span></span></span>)
+<span class="lineno">  300 </span>
+<span class="lineno">  301 </span>
+<span class="lineno">  302 </span>------------------------------------------------------------------------------
+<span class="lineno">  303 </span>toPartDisposition :: ByteString -&gt; PartDisposition
+<span class="lineno">  304 </span><span class="decl"><span class="istickedoff">toPartDisposition s | s == &quot;attachment&quot; = DispositionAttachment</span>
+<span class="lineno">  305 </span><span class="spaces">                    </span><span class="istickedoff">| s == &quot;file&quot;       = DispositionFile</span>
+<span class="lineno">  306 </span><span class="spaces">                    </span><span class="istickedoff">| s == &quot;form-data&quot;  = DispositionFormData</span>
+<span class="lineno">  307 </span><span class="spaces">                    </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>         = DispositionOther s</span></span>
+<span class="lineno">  308 </span>
+<span class="lineno">  309 </span>
+<span class="lineno">  310 </span>------------------------------------------------------------------------------
+<span class="lineno">  311 </span>-- | All of the exceptions defined in this package inherit from
+<span class="lineno">  312 </span>-- 'FileUploadException', so if you write
+<span class="lineno">  313 </span>--
+<span class="lineno">  314 </span>-- &gt; foo `catch` \(e :: FileUploadException) -&gt; ...
+<span class="lineno">  315 </span>--
+<span class="lineno">  316 </span>-- you can catch a 'BadPartException', a 'PolicyViolationException', etc.
+<span class="lineno">  317 </span>data FileUploadException = forall e . (ExceptionWithReason e, Show e) =&gt;
+<span class="lineno">  318 </span>                           WrappedFileUploadException e
+<span class="lineno">  319 </span>  deriving (Typeable)
+<span class="lineno">  320 </span>
+<span class="lineno">  321 </span>
+<span class="lineno">  322 </span>------------------------------------------------------------------------------
+<span class="lineno">  323 </span>class Exception e =&gt; ExceptionWithReason e where
+<span class="lineno">  324 </span>    exceptionReason :: e -&gt; Text
+<span class="lineno">  325 </span>
+<span class="lineno">  326 </span>
+<span class="lineno">  327 </span>------------------------------------------------------------------------------
+<span class="lineno">  328 </span>instance Show FileUploadException where
+<span class="lineno">  329 </span>    <span class="decl"><span class="istickedoff">show (WrappedFileUploadException e) = show e</span></span>
+<span class="lineno">  330 </span>
+<span class="lineno">  331 </span>
+<span class="lineno">  332 </span>------------------------------------------------------------------------------
+<span class="lineno">  333 </span>instance Exception FileUploadException
+<span class="lineno">  334 </span>
+<span class="lineno">  335 </span>
+<span class="lineno">  336 </span>------------------------------------------------------------------------------
+<span class="lineno">  337 </span>-- | Human-readable error message corresponding to the 'FileUploadException'.
+<span class="lineno">  338 </span>fileUploadExceptionReason :: FileUploadException -&gt; Text
+<span class="lineno">  339 </span><span class="decl"><span class="istickedoff">fileUploadExceptionReason (WrappedFileUploadException e) = exceptionReason e</span></span>
+<span class="lineno">  340 </span>
+<span class="lineno">  341 </span>
+<span class="lineno">  342 </span>------------------------------------------------------------------------------
+<span class="lineno">  343 </span>uploadExceptionToException :: ExceptionWithReason e =&gt; e -&gt; SomeException
+<span class="lineno">  344 </span><span class="decl"><span class="istickedoff">uploadExceptionToException = toException . WrappedFileUploadException</span></span>
+<span class="lineno">  345 </span>
+<span class="lineno">  346 </span>
+<span class="lineno">  347 </span>------------------------------------------------------------------------------
+<span class="lineno">  348 </span>uploadExceptionFromException :: ExceptionWithReason e =&gt; SomeException -&gt; Maybe e
+<span class="lineno">  349 </span><span class="decl"><span class="istickedoff">uploadExceptionFromException x = do</span>
+<span class="lineno">  350 </span><span class="spaces">    </span><span class="istickedoff">WrappedFileUploadException e &lt;- fromException x</span>
+<span class="lineno">  351 </span><span class="spaces">    </span><span class="istickedoff">cast e</span></span>
+<span class="lineno">  352 </span>
+<span class="lineno">  353 </span>
+<span class="lineno">  354 </span>------------------------------------------------------------------------------
+<span class="lineno">  355 </span>-- | Thrown when a part is invalid in some way (e.g. the headers are too large).
+<span class="lineno">  356 </span>data BadPartException = BadPartException {
+<span class="lineno">  357 </span>  -- | Human-readable error message corresponding to the 'BadPartException'.
+<span class="lineno">  358 </span>  <span class="istickedoff"><span class="decl"><span class="istickedoff">badPartExceptionReason</span></span></span> :: Text
+<span class="lineno">  359 </span>  }
+<span class="lineno">  360 </span>  deriving (Typeable)
+<span class="lineno">  361 </span>
+<span class="lineno">  362 </span>instance Exception BadPartException where
+<span class="lineno">  363 </span>    <span class="decl"><span class="istickedoff">toException = uploadExceptionToException</span></span>
+<span class="lineno">  364 </span>    <span class="decl"><span class="istickedoff">fromException = uploadExceptionFromException</span></span>
+<span class="lineno">  365 </span>
+<span class="lineno">  366 </span>instance ExceptionWithReason BadPartException where
+<span class="lineno">  367 </span>    <span class="decl"><span class="istickedoff">exceptionReason (BadPartException e) = T.concat [&quot;Bad part: &quot;, e]</span></span>
+<span class="lineno">  368 </span>
+<span class="lineno">  369 </span>instance Show BadPartException where
+<span class="lineno">  370 </span>  <span class="decl"><span class="istickedoff">show = T.unpack . exceptionReason</span></span>
+<span class="lineno">  371 </span>
+<span class="lineno">  372 </span>
+<span class="lineno">  373 </span>------------------------------------------------------------------------------
+<span class="lineno">  374 </span>-- | Thrown when an 'UploadPolicy' or 'PartUploadPolicy' is violated.
+<span class="lineno">  375 </span>data PolicyViolationException = PolicyViolationException {
+<span class="lineno">  376 </span>      -- | Human-readable error message corresponding to the
+<span class="lineno">  377 </span>      -- 'PolicyViolationException'.
+<span class="lineno">  378 </span>      <span class="istickedoff"><span class="decl"><span class="istickedoff">policyViolationExceptionReason</span></span></span> :: Text
+<span class="lineno">  379 </span>    } deriving (Typeable)
+<span class="lineno">  380 </span>
+<span class="lineno">  381 </span>instance Exception PolicyViolationException where
+<span class="lineno">  382 </span>    <span class="decl"><span class="istickedoff">toException e@(PolicyViolationException _) =</span>
+<span class="lineno">  383 </span><span class="spaces">        </span><span class="istickedoff">uploadExceptionToException e</span></span>
+<span class="lineno">  384 </span>    <span class="decl"><span class="istickedoff">fromException = uploadExceptionFromException</span></span>
+<span class="lineno">  385 </span>
+<span class="lineno">  386 </span>instance ExceptionWithReason PolicyViolationException where
+<span class="lineno">  387 </span>    <span class="decl"><span class="istickedoff">exceptionReason (PolicyViolationException r) =</span>
+<span class="lineno">  388 </span><span class="spaces">        </span><span class="istickedoff">T.concat [&quot;File upload policy violation: &quot;, r]</span></span>
+<span class="lineno">  389 </span>
+<span class="lineno">  390 </span>instance Show PolicyViolationException where
+<span class="lineno">  391 </span>  <span class="decl"><span class="istickedoff">show (PolicyViolationException s) = &quot;File upload policy violation: &quot;</span>
+<span class="lineno">  392 </span><span class="spaces">                                            </span><span class="istickedoff">++ T.unpack s</span></span>
+<span class="lineno">  393 </span>
+<span class="lineno">  394 </span>
+<span class="lineno">  395 </span>------------------------------------------------------------------------------
+<span class="lineno">  396 </span>-- | 'UploadPolicy' controls overall policy decisions relating to
+<span class="lineno">  397 </span>-- @multipart/form-data@ uploads, specifically:
+<span class="lineno">  398 </span>--
+<span class="lineno">  399 </span>-- * whether to treat parts without filenames as form input (reading them into
+<span class="lineno">  400 </span>--   the 'rqParams' map)
+<span class="lineno">  401 </span>--
+<span class="lineno">  402 </span>-- * because form input is read into memory, the maximum size of a form input
+<span class="lineno">  403 </span>--   read in this manner, and the maximum number of form inputs
+<span class="lineno">  404 </span>--
+<span class="lineno">  405 </span>-- * the minimum upload rate a client must maintain before we kill the
+<span class="lineno">  406 </span>--   connection; if very low-bitrate uploads were allowed then a Snap server
+<span class="lineno">  407 </span>--   would be vulnerable to a trivial denial-of-service using a
+<span class="lineno">  408 </span>--   \&quot;slowloris\&quot;-type attack
+<span class="lineno">  409 </span>--
+<span class="lineno">  410 </span>-- * the minimum number of seconds which must elapse before we start killing
+<span class="lineno">  411 </span>--   uploads for having too low an upload rate.
+<span class="lineno">  412 </span>--
+<span class="lineno">  413 </span>-- * the amount of time we should wait before timing out the connection
+<span class="lineno">  414 </span>--   whenever we receive input from the client.
+<span class="lineno">  415 </span>data UploadPolicy = UploadPolicy {
+<span class="lineno">  416 </span>      <span class="istickedoff"><span class="decl"><span class="istickedoff">processFormInputs</span></span></span>         :: Bool
+<span class="lineno">  417 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">maximumFormInputSize</span></span></span>      :: Int64
+<span class="lineno">  418 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">maximumNumberOfFormInputs</span></span></span> :: Int
+<span class="lineno">  419 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">minimumUploadRate</span></span></span>         :: Double
+<span class="lineno">  420 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">minimumUploadSeconds</span></span></span>      :: Int
+<span class="lineno">  421 </span>    , <span class="istickedoff"><span class="decl"><span class="istickedoff">uploadTimeout</span></span></span>             :: Int
+<span class="lineno">  422 </span>}
+<span class="lineno">  423 </span>
+<span class="lineno">  424 </span>
+<span class="lineno">  425 </span>------------------------------------------------------------------------------
+<span class="lineno">  426 </span>-- | A reasonable set of defaults for upload policy. The default policy is:
+<span class="lineno">  427 </span>--
+<span class="lineno">  428 </span>--   [@maximum form input size@]                128kB
+<span class="lineno">  429 </span>--
+<span class="lineno">  430 </span>--   [@maximum number of form inputs@]          10
+<span class="lineno">  431 </span>--
+<span class="lineno">  432 </span>--   [@minimum upload rate@]                    1kB/s
+<span class="lineno">  433 </span>--
+<span class="lineno">  434 </span>--   [@seconds before rate limiting kicks in@]  10
+<span class="lineno">  435 </span>--
+<span class="lineno">  436 </span>--   [@inactivity timeout@]                     20 seconds
+<span class="lineno">  437 </span>--
+<span class="lineno">  438 </span>defaultUploadPolicy :: UploadPolicy
+<span class="lineno">  439 </span><span class="decl"><span class="istickedoff">defaultUploadPolicy = UploadPolicy True maxSize maxNum minRate minSeconds tout</span>
+<span class="lineno">  440 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  441 </span><span class="spaces">    </span><span class="istickedoff">maxSize    = 2^(17::Int)</span>
+<span class="lineno">  442 </span><span class="spaces">    </span><span class="istickedoff">maxNum     = 10</span>
+<span class="lineno">  443 </span><span class="spaces">    </span><span class="istickedoff">minRate    = 1000</span>
+<span class="lineno">  444 </span><span class="spaces">    </span><span class="istickedoff">minSeconds = 10</span>
+<span class="lineno">  445 </span><span class="spaces">    </span><span class="istickedoff">tout       = 20</span></span>
+<span class="lineno">  446 </span>
+<span class="lineno">  447 </span>
+<span class="lineno">  448 </span>------------------------------------------------------------------------------
+<span class="lineno">  449 </span>-- | Does this upload policy stipulate that we want to treat parts without
+<span class="lineno">  450 </span>-- filenames as form input?
+<span class="lineno">  451 </span>doProcessFormInputs :: UploadPolicy -&gt; Bool
+<span class="lineno">  452 </span><span class="decl"><span class="istickedoff">doProcessFormInputs = processFormInputs</span></span>
+<span class="lineno">  453 </span>
+<span class="lineno">  454 </span>
+<span class="lineno">  455 </span>------------------------------------------------------------------------------
+<span class="lineno">  456 </span>-- | Set the upload policy for treating parts without filenames as form input.
+<span class="lineno">  457 </span>setProcessFormInputs :: Bool -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  458 </span><span class="decl"><span class="istickedoff">setProcessFormInputs b u = u { processFormInputs = b }</span></span>
+<span class="lineno">  459 </span>
+<span class="lineno">  460 </span>
+<span class="lineno">  461 </span>------------------------------------------------------------------------------
+<span class="lineno">  462 </span>-- | Get the maximum size of a form input which will be read into our
+<span class="lineno">  463 </span>--   'rqParams' map.
+<span class="lineno">  464 </span>getMaximumFormInputSize :: UploadPolicy -&gt; Int64
+<span class="lineno">  465 </span><span class="decl"><span class="istickedoff">getMaximumFormInputSize = maximumFormInputSize</span></span>
+<span class="lineno">  466 </span>
+<span class="lineno">  467 </span>
+<span class="lineno">  468 </span>------------------------------------------------------------------------------
+<span class="lineno">  469 </span>-- | Set the maximum size of a form input which will be read into our
+<span class="lineno">  470 </span>--   'rqParams' map.
+<span class="lineno">  471 </span>setMaximumFormInputSize :: Int64 -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  472 </span><span class="decl"><span class="istickedoff">setMaximumFormInputSize s u = u { maximumFormInputSize = s }</span></span>
+<span class="lineno">  473 </span>
+<span class="lineno">  474 </span>
+<span class="lineno">  475 </span>------------------------------------------------------------------------------
+<span class="lineno">  476 </span>-- | Get the maximum size of a form input which will be read into our
+<span class="lineno">  477 </span>--   'rqParams' map.
+<span class="lineno">  478 </span>getMaximumNumberOfFormInputs :: UploadPolicy -&gt; Int
+<span class="lineno">  479 </span><span class="decl"><span class="istickedoff">getMaximumNumberOfFormInputs = maximumNumberOfFormInputs</span></span>
+<span class="lineno">  480 </span>
+<span class="lineno">  481 </span>
+<span class="lineno">  482 </span>------------------------------------------------------------------------------
+<span class="lineno">  483 </span>-- | Set the maximum size of a form input which will be read into our
+<span class="lineno">  484 </span>--   'rqParams' map.
+<span class="lineno">  485 </span>setMaximumNumberOfFormInputs :: Int -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  486 </span><span class="decl"><span class="istickedoff">setMaximumNumberOfFormInputs s u = u { maximumNumberOfFormInputs = s }</span></span>
+<span class="lineno">  487 </span>
+<span class="lineno">  488 </span>
+<span class="lineno">  489 </span>------------------------------------------------------------------------------
+<span class="lineno">  490 </span>-- | Get the minimum rate (in /bytes\/second/) a client must maintain before
+<span class="lineno">  491 </span>--   we kill the connection.
+<span class="lineno">  492 </span>getMinimumUploadRate :: UploadPolicy -&gt; Double
+<span class="lineno">  493 </span><span class="decl"><span class="istickedoff">getMinimumUploadRate = minimumUploadRate</span></span>
+<span class="lineno">  494 </span>
+<span class="lineno">  495 </span>
+<span class="lineno">  496 </span>------------------------------------------------------------------------------
+<span class="lineno">  497 </span>-- | Set the minimum rate (in /bytes\/second/) a client must maintain before
+<span class="lineno">  498 </span>--   we kill the connection.
+<span class="lineno">  499 </span>setMinimumUploadRate :: Double -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  500 </span><span class="decl"><span class="istickedoff">setMinimumUploadRate s u = u { minimumUploadRate = s }</span></span>
+<span class="lineno">  501 </span>
+<span class="lineno">  502 </span>
+<span class="lineno">  503 </span>------------------------------------------------------------------------------
+<span class="lineno">  504 </span>-- | Get the amount of time which must elapse before we begin enforcing the
+<span class="lineno">  505 </span>--   upload rate minimum
+<span class="lineno">  506 </span>getMinimumUploadSeconds :: UploadPolicy -&gt; Int
+<span class="lineno">  507 </span><span class="decl"><span class="istickedoff">getMinimumUploadSeconds = minimumUploadSeconds</span></span>
+<span class="lineno">  508 </span>
+<span class="lineno">  509 </span>
+<span class="lineno">  510 </span>------------------------------------------------------------------------------
+<span class="lineno">  511 </span>-- | Set the amount of time which must elapse before we begin enforcing the
+<span class="lineno">  512 </span>--   upload rate minimum
+<span class="lineno">  513 </span>setMinimumUploadSeconds :: Int -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  514 </span><span class="decl"><span class="istickedoff">setMinimumUploadSeconds s u = u { minimumUploadSeconds = s }</span></span>
+<span class="lineno">  515 </span>
+<span class="lineno">  516 </span>
+<span class="lineno">  517 </span>------------------------------------------------------------------------------
+<span class="lineno">  518 </span>-- | Get the \&quot;upload timeout\&quot;. Whenever input is received from the client,
+<span class="lineno">  519 </span>--   the connection timeout is set this many seconds in the future.
+<span class="lineno">  520 </span>getUploadTimeout :: UploadPolicy -&gt; Int
+<span class="lineno">  521 </span><span class="decl"><span class="istickedoff">getUploadTimeout = uploadTimeout</span></span>
+<span class="lineno">  522 </span>
+<span class="lineno">  523 </span>
+<span class="lineno">  524 </span>------------------------------------------------------------------------------
+<span class="lineno">  525 </span>-- | Set the upload timeout.
+<span class="lineno">  526 </span>setUploadTimeout :: Int -&gt; UploadPolicy -&gt; UploadPolicy
+<span class="lineno">  527 </span><span class="decl"><span class="istickedoff">setUploadTimeout s u = u { uploadTimeout = s }</span></span>
+<span class="lineno">  528 </span>
+<span class="lineno">  529 </span>
+<span class="lineno">  530 </span>------------------------------------------------------------------------------
+<span class="lineno">  531 </span>-- | Upload policy can be set on an \&quot;general\&quot; basis (using 'UploadPolicy'),
+<span class="lineno">  532 </span>--   but handlers can also make policy decisions on individual files\/parts
+<span class="lineno">  533 </span>--   uploaded. For each part uploaded, handlers can decide:
+<span class="lineno">  534 </span>--
+<span class="lineno">  535 </span>-- * whether to allow the file upload at all
+<span class="lineno">  536 </span>--
+<span class="lineno">  537 </span>-- * the maximum size of uploaded files, if allowed
+<span class="lineno">  538 </span>data PartUploadPolicy = PartUploadPolicy (Maybe Int64)
+<span class="lineno">  539 </span>
+<span class="lineno">  540 </span>
+<span class="lineno">  541 </span>------------------------------------------------------------------------------
+<span class="lineno">  542 </span>-- | Disallows the file to be uploaded.
+<span class="lineno">  543 </span>disallow :: PartUploadPolicy
+<span class="lineno">  544 </span><span class="decl"><span class="istickedoff">disallow = PartUploadPolicy Nothing</span></span>
+<span class="lineno">  545 </span>
+<span class="lineno">  546 </span>
+<span class="lineno">  547 </span>------------------------------------------------------------------------------
+<span class="lineno">  548 </span>-- | Allows the file to be uploaded, with maximum size /n/.
+<span class="lineno">  549 </span>allowWithMaximumSize :: Int64 -&gt; PartUploadPolicy
+<span class="lineno">  550 </span><span class="decl"><span class="istickedoff">allowWithMaximumSize = PartUploadPolicy . Just</span></span>
+<span class="lineno">  551 </span>
+<span class="lineno">  552 </span>
+<span class="lineno">  553 </span>------------------------------------------------------------------------------
+<span class="lineno">  554 </span>-- private exports follow. FIXME: organize
+<span class="lineno">  555 </span>------------------------------------------------------------------------------
+<span class="lineno">  556 </span>
+<span class="lineno">  557 </span>------------------------------------------------------------------------------
+<span class="lineno">  558 </span>captureVariableOrReadFile ::
+<span class="lineno">  559 </span>       Int64                                   -- ^ maximum size of form input
+<span class="lineno">  560 </span>    -&gt; PartProcessor a                         -- ^ file reading code
+<span class="lineno">  561 </span>    -&gt; PartProcessor (Capture a)
+<span class="lineno">  562 </span><span class="decl"><span class="istickedoff">captureVariableOrReadFile maxSize fileHandler partInfo stream =</span>
+<span class="lineno">  563 </span><span class="spaces">    </span><span class="istickedoff">if isFile</span>
+<span class="lineno">  564 </span><span class="spaces">      </span><span class="istickedoff">then liftM File $ fileHandler partInfo stream</span>
+<span class="lineno">  565 </span><span class="spaces">      </span><span class="istickedoff">else variable `catch` handler</span>
+<span class="lineno">  566 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  567 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  568 </span><span class="spaces">    </span><span class="istickedoff">isFile = isJust (partFileName partInfo) ||</span>
+<span class="lineno">  569 </span><span class="spaces">             </span><span class="istickedoff">partDisposition partInfo == DispositionFile</span>
+<span class="lineno">  570 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  571 </span><span class="spaces">    </span><span class="istickedoff">variable = do</span>
+<span class="lineno">  572 </span><span class="spaces">        </span><span class="istickedoff">x &lt;- liftM S.concat $</span>
+<span class="lineno">  573 </span><span class="spaces">             </span><span class="istickedoff">Streams.throwIfProducesMoreThan maxSize stream &gt;&gt;= Streams.toList</span>
+<span class="lineno">  574 </span><span class="spaces">        </span><span class="istickedoff">return $! Capture fieldName x</span>
+<span class="lineno">  575 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  576 </span><span class="spaces">    </span><span class="istickedoff">fieldName = partFieldName partInfo</span>
+<span class="lineno">  577 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  578 </span><span class="spaces">    </span><span class="istickedoff">handler (_ :: TooManyBytesReadException) =</span>
+<span class="lineno">  579 </span><span class="spaces">        </span><span class="istickedoff">throwIO $ PolicyViolationException $</span>
+<span class="lineno">  580 </span><span class="spaces">                </span><span class="istickedoff">T.concat [ &quot;form input '&quot;</span>
+<span class="lineno">  581 </span><span class="spaces">                         </span><span class="istickedoff">, TE.decodeUtf8 fieldName</span>
+<span class="lineno">  582 </span><span class="spaces">                         </span><span class="istickedoff">, &quot;' exceeded maximum permissible size (&quot;</span>
+<span class="lineno">  583 </span><span class="spaces">                         </span><span class="istickedoff">, T.pack $ show maxSize</span>
+<span class="lineno">  584 </span><span class="spaces">                         </span><span class="istickedoff">, &quot; bytes)&quot; ]</span></span>
+<span class="lineno">  585 </span>
+<span class="lineno">  586 </span>
+<span class="lineno">  587 </span>------------------------------------------------------------------------------
+<span class="lineno">  588 </span>data Capture a = Capture ByteString ByteString
+<span class="lineno">  589 </span>               | File a
+<span class="lineno">  590 </span>
+<span class="lineno">  591 </span>
+<span class="lineno">  592 </span>------------------------------------------------------------------------------
+<span class="lineno">  593 </span>fileReader :: FilePath
+<span class="lineno">  594 </span>           -&gt; (PartInfo -&gt; Either PolicyViolationException FilePath -&gt; IO a)
+<span class="lineno">  595 </span>           -&gt; PartProcessor a
+<span class="lineno">  596 </span><span class="decl"><span class="istickedoff">fileReader tmpdir partProc partInfo input =</span>
+<span class="lineno">  597 </span><span class="spaces">    </span><span class="istickedoff">withTempFile tmpdir &quot;snap-upload-&quot; $ \(fn, h) -&gt; do</span>
+<span class="lineno">  598 </span><span class="spaces">        </span><span class="istickedoff">hSetBuffering h NoBuffering</span>
+<span class="lineno">  599 </span><span class="spaces">        </span><span class="istickedoff">output &lt;- Streams.handleToOutputStream h</span>
+<span class="lineno">  600 </span><span class="spaces">        </span><span class="istickedoff">Streams.connect input output</span>
+<span class="lineno">  601 </span><span class="spaces">        </span><span class="istickedoff">hClose h</span>
+<span class="lineno">  602 </span><span class="spaces">        </span><span class="istickedoff">partProc partInfo $ Right fn</span></span>
+<span class="lineno">  603 </span>
+<span class="lineno">  604 </span>
+<span class="lineno">  605 </span>------------------------------------------------------------------------------
+<span class="lineno">  606 </span>internalHandleMultipart ::
+<span class="lineno">  607 </span>       ByteString                                    -- ^ boundary value
+<span class="lineno">  608 </span>    -&gt; (PartInfo -&gt; InputStream ByteString -&gt; IO a)  -- ^ part processor
+<span class="lineno">  609 </span>    -&gt; InputStream ByteString
+<span class="lineno">  610 </span>    -&gt; IO [a]
+<span class="lineno">  611 </span><span class="decl"><span class="istickedoff">internalHandleMultipart !boundary clientHandler !stream = go</span>
+<span class="lineno">  612 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  613 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  614 </span><span class="spaces">    </span><span class="istickedoff">go = do</span>
+<span class="lineno">  615 </span><span class="spaces">        </span><span class="istickedoff">-- swallow the first boundary</span>
+<span class="lineno">  616 </span><span class="spaces">        </span><span class="istickedoff">_        &lt;- parseFromStream (parseFirstBoundary boundary) stream</span>
+<span class="lineno">  617 </span><span class="spaces">        </span><span class="istickedoff">bmstream &lt;- search (fullBoundary boundary) stream</span>
+<span class="lineno">  618 </span><span class="spaces">        </span><span class="istickedoff">liftM concat $ processParts goPart bmstream</span>
+<span class="lineno">  619 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  620 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  621 </span><span class="spaces">    </span><span class="istickedoff">pBoundary !b = Atto.try $ do</span>
+<span class="lineno">  622 </span><span class="spaces">      </span><span class="istickedoff">_ &lt;- string &quot;--&quot;</span>
+<span class="lineno">  623 </span><span class="spaces">      </span><span class="istickedoff">string b</span>
+<span class="lineno">  624 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  625 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  626 </span><span class="spaces">    </span><span class="istickedoff">fullBoundary !b       = S.concat [&quot;\r\n&quot;, &quot;--&quot;, b]</span>
+<span class="lineno">  627 </span><span class="spaces">    </span><span class="istickedoff">pLine                 = takeWhile (not . isEndOfLine . c2w) &lt;* eol</span>
+<span class="lineno">  628 </span><span class="spaces">    </span><span class="istickedoff">parseFirstBoundary !b = pBoundary b &lt;|&gt; (pLine *&gt; parseFirstBoundary b)</span>
+<span class="lineno">  629 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  630 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  631 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  632 </span><span class="spaces">    </span><span class="istickedoff">takeHeaders !str = hdrs `catch` handler</span>
+<span class="lineno">  633 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  634 </span><span class="spaces">        </span><span class="istickedoff">hdrs = do</span>
+<span class="lineno">  635 </span><span class="spaces">            </span><span class="istickedoff">str' &lt;- Streams.throwIfProducesMoreThan mAX_HDRS_SIZE str</span>
+<span class="lineno">  636 </span><span class="spaces">            </span><span class="istickedoff">liftM toHeaders $ parseFromStream pHeadersWithSeparator str'</span>
+<span class="lineno">  637 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  638 </span><span class="spaces">        </span><span class="istickedoff">handler (_ :: TooManyBytesReadException) =</span>
+<span class="lineno">  639 </span><span class="spaces">            </span><span class="istickedoff">throwIO $ BadPartException &quot;headers exceeded maximum size&quot;</span>
+<span class="lineno">  640 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  641 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  642 </span><span class="spaces">    </span><span class="istickedoff">goPart !str = do</span>
+<span class="lineno">  643 </span><span class="spaces">        </span><span class="istickedoff">hdrs &lt;- takeHeaders str</span>
+<span class="lineno">  644 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  645 </span><span class="spaces">        </span><span class="istickedoff">-- are we using mixed?</span>
+<span class="lineno">  646 </span><span class="spaces">        </span><span class="istickedoff">let (contentType, mboundary) = getContentType hdrs</span>
+<span class="lineno">  647 </span><span class="spaces">        </span><span class="istickedoff">let (fieldName, fileName, disposition) = getFieldHeaderInfo hdrs</span>
+<span class="lineno">  648 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  649 </span><span class="spaces">        </span><span class="istickedoff">if contentType == &quot;multipart/mixed&quot;</span>
+<span class="lineno">  650 </span><span class="spaces">          </span><span class="istickedoff">then maybe (throwIO $ BadPartException $</span>
+<span class="lineno">  651 </span><span class="spaces">                      </span><span class="istickedoff">&quot;got multipart/mixed without boundary&quot;)</span>
+<span class="lineno">  652 </span><span class="spaces">                     </span><span class="istickedoff">(processMixed fieldName str)</span>
+<span class="lineno">  653 </span><span class="spaces">                     </span><span class="istickedoff">mboundary</span>
+<span class="lineno">  654 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  655 </span><span class="spaces">              </span><span class="istickedoff">let info = PartInfo fieldName fileName contentType disposition hdrs</span>
+<span class="lineno">  656 </span><span class="spaces">              </span><span class="istickedoff">liftM (:[]) $ clientHandler info str</span>
+<span class="lineno">  657 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  658 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  659 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  660 </span><span class="spaces">    </span><span class="istickedoff">processMixed !fieldName !str !mixedBoundary = do</span>
+<span class="lineno">  661 </span><span class="spaces">        </span><span class="istickedoff">-- swallow the first boundary</span>
+<span class="lineno">  662 </span><span class="spaces">        </span><span class="istickedoff">_  &lt;- parseFromStream (parseFirstBoundary mixedBoundary) str</span>
+<span class="lineno">  663 </span><span class="spaces">        </span><span class="istickedoff">bm &lt;- search (fullBoundary mixedBoundary) str</span>
+<span class="lineno">  664 </span><span class="spaces">        </span><span class="istickedoff">processParts (mixedStream fieldName) bm</span>
+<span class="lineno">  665 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  666 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  667 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  668 </span><span class="spaces">    </span><span class="istickedoff">mixedStream !fieldName !str = do</span>
+<span class="lineno">  669 </span><span class="spaces">        </span><span class="istickedoff">hdrs &lt;- takeHeaders str</span>
+<span class="lineno">  670 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  671 </span><span class="spaces">        </span><span class="istickedoff">let (contentType, _)           = getContentType hdrs</span>
+<span class="lineno">  672 </span><span class="spaces">        </span><span class="istickedoff">let (_, fileName, disposition) = getFieldHeaderInfo hdrs</span>
+<span class="lineno">  673 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  674 </span><span class="spaces">        </span><span class="istickedoff">let info = PartInfo fieldName fileName contentType disposition hdrs</span>
+<span class="lineno">  675 </span><span class="spaces">        </span><span class="istickedoff">clientHandler info str</span></span>
+<span class="lineno">  676 </span>
+<span class="lineno">  677 </span>
+<span class="lineno">  678 </span>------------------------------------------------------------------------------
+<span class="lineno">  679 </span>getContentType :: Headers
+<span class="lineno">  680 </span>               -&gt; (ByteString, Maybe ByteString)
+<span class="lineno">  681 </span><span class="decl"><span class="istickedoff">getContentType hdrs = (contentType, boundary)</span>
+<span class="lineno">  682 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  683 </span><span class="spaces">    </span><span class="istickedoff">contentTypeValue = fromMaybe &quot;text/plain&quot; $</span>
+<span class="lineno">  684 </span><span class="spaces">                       </span><span class="istickedoff">getHeader &quot;content-type&quot; hdrs</span>
+<span class="lineno">  685 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  686 </span><span class="spaces">    </span><span class="istickedoff">eCT = fullyParse contentTypeValue pContentTypeWithParameters</span>
+<span class="lineno">  687 </span><span class="spaces">    </span><span class="istickedoff">(!contentType, !params) = either (const (&quot;text/plain&quot;, [])) id eCT</span>
+<span class="lineno">  688 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  689 </span><span class="spaces">    </span><span class="istickedoff">boundary = findParam &quot;boundary&quot; params</span></span>
+<span class="lineno">  690 </span>
+<span class="lineno">  691 </span>
+<span class="lineno">  692 </span>------------------------------------------------------------------------------
+<span class="lineno">  693 </span>getFieldHeaderInfo :: Headers -&gt; (ByteString, Maybe ByteString, PartDisposition)
+<span class="lineno">  694 </span><span class="decl"><span class="istickedoff">getFieldHeaderInfo hdrs = (fieldName, fileName, disposition)</span>
+<span class="lineno">  695 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  696 </span><span class="spaces">    </span><span class="istickedoff">contentDispositionValue = fromMaybe &quot;unknown&quot; $</span>
+<span class="lineno">  697 </span><span class="spaces">                              </span><span class="istickedoff">getHeader &quot;content-disposition&quot; hdrs</span>
+<span class="lineno">  698 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  699 </span><span class="spaces">    </span><span class="istickedoff">eDisposition = fullyParse contentDispositionValue pValueWithParameters</span>
+<span class="lineno">  700 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  701 </span><span class="spaces">    </span><span class="istickedoff">(!dispositionType, dispositionParameters) =</span>
+<span class="lineno">  702 </span><span class="spaces">        </span><span class="istickedoff">either (const (&quot;unknown&quot;, [])) id eDisposition</span>
+<span class="lineno">  703 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  704 </span><span class="spaces">    </span><span class="istickedoff">disposition = toPartDisposition dispositionType</span>
+<span class="lineno">  705 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  706 </span><span class="spaces">    </span><span class="istickedoff">fieldName = fromMaybe &quot;&quot; $ findParam &quot;name&quot; dispositionParameters</span>
+<span class="lineno">  707 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  708 </span><span class="spaces">    </span><span class="istickedoff">fileName = findParam &quot;filename&quot; dispositionParameters</span></span>
+<span class="lineno">  709 </span>
+<span class="lineno">  710 </span>
+<span class="lineno">  711 </span>------------------------------------------------------------------------------
+<span class="lineno">  712 </span>findParam :: (Eq a) =&gt; a -&gt; [(a, b)] -&gt; Maybe b
+<span class="lineno">  713 </span><span class="decl"><span class="istickedoff">findParam p = fmap snd . find ((== p) . fst)</span></span>
+<span class="lineno">  714 </span>
+<span class="lineno">  715 </span>
+<span class="lineno">  716 </span>------------------------------------------------------------------------------
+<span class="lineno">  717 </span>partStream :: InputStream MatchInfo -&gt; IO (InputStream ByteString)
+<span class="lineno">  718 </span><span class="decl"><span class="istickedoff">partStream st = Streams.makeInputStream go</span>
+<span class="lineno">  719 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  720 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  721 </span><span class="spaces">    </span><span class="istickedoff">go = do</span>
+<span class="lineno">  722 </span><span class="spaces">        </span><span class="istickedoff">s &lt;- Streams.read st</span>
+<span class="lineno">  723 </span><span class="spaces">        </span><span class="istickedoff">return $! s &gt;&gt;= f</span>
+<span class="lineno">  724 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  725 </span><span class="spaces">    </span><span class="istickedoff">f (NoMatch s) = return s</span>
+<span class="lineno">  726 </span><span class="spaces">    </span><span class="istickedoff">f _           = mzero</span></span>
+<span class="lineno">  727 </span>
+<span class="lineno">  728 </span>
+<span class="lineno">  729 </span>
+<span class="lineno">  730 </span>
+<span class="lineno">  731 </span>------------------------------------------------------------------------------
+<span class="lineno">  732 </span>-- | Assuming we've already identified the boundary value and split the input
+<span class="lineno">  733 </span>-- up into parts which match and parts which don't, run the given 'ByteString'
+<span class="lineno">  734 </span>-- InputStream over each part and grab a list of the resulting values.
+<span class="lineno">  735 </span>--
+<span class="lineno">  736 </span>-- TODO/FIXME: fix description
+<span class="lineno">  737 </span>processParts :: (InputStream ByteString -&gt; IO a)
+<span class="lineno">  738 </span>             -&gt; InputStream MatchInfo
+<span class="lineno">  739 </span>             -&gt; IO [a]
+<span class="lineno">  740 </span><span class="decl"><span class="istickedoff">processParts partFunc stream = go id</span>
+<span class="lineno">  741 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  742 </span><span class="spaces">    </span><span class="istickedoff">part pStream = do</span>
+<span class="lineno">  743 </span><span class="spaces">        </span><span class="istickedoff">isLast &lt;- parseFromStream pBoundaryEnd pStream</span>
+<span class="lineno">  744 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  745 </span><span class="spaces">        </span><span class="istickedoff">if isLast</span>
+<span class="lineno">  746 </span><span class="spaces">          </span><span class="istickedoff">then return Nothing</span>
+<span class="lineno">  747 </span><span class="spaces">          </span><span class="istickedoff">else do</span>
+<span class="lineno">  748 </span><span class="spaces">              </span><span class="istickedoff">!x &lt;- partFunc pStream</span>
+<span class="lineno">  749 </span><span class="spaces">              </span><span class="istickedoff">Streams.skipToEof pStream</span>
+<span class="lineno">  750 </span><span class="spaces">              </span><span class="istickedoff">return $! Just x</span>
+<span class="lineno">  751 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  752 </span><span class="spaces">    </span><span class="istickedoff">go !soFar = partStream stream &gt;&gt;=</span>
+<span class="lineno">  753 </span><span class="spaces">                </span><span class="istickedoff">part &gt;&gt;=</span>
+<span class="lineno">  754 </span><span class="spaces">                </span><span class="istickedoff">maybe (return $ soFar []) (\x -&gt; go (soFar . (x:)))</span>
+<span class="lineno">  755 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  756 </span><span class="spaces">    </span><span class="istickedoff">pBoundaryEnd = (eol *&gt; pure False) &lt;|&gt; (string &quot;--&quot; *&gt; pure True)</span></span>
+<span class="lineno">  757 </span>
+<span class="lineno">  758 </span>
+<span class="lineno">  759 </span>------------------------------------------------------------------------------
+<span class="lineno">  760 </span>eol :: Parser ByteString
+<span class="lineno">  761 </span><span class="decl"><span class="istickedoff">eol = (string &quot;\n&quot;) &lt;|&gt; (string &quot;\r\n&quot;)</span></span>
+<span class="lineno">  762 </span>
+<span class="lineno">  763 </span>
+<span class="lineno">  764 </span>------------------------------------------------------------------------------
+<span class="lineno">  765 </span>pHeadersWithSeparator :: Parser [(ByteString,ByteString)]
+<span class="lineno">  766 </span><span class="decl"><span class="istickedoff">pHeadersWithSeparator = pHeaders &lt;* crlf</span></span>
+<span class="lineno">  767 </span>
+<span class="lineno">  768 </span>
+<span class="lineno">  769 </span>------------------------------------------------------------------------------
+<span class="lineno">  770 </span>toHeaders :: [(ByteString,ByteString)] -&gt; Headers
+<span class="lineno">  771 </span><span class="decl"><span class="istickedoff">toHeaders kvps = H.fromList kvps'</span>
+<span class="lineno">  772 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  773 </span><span class="spaces">    </span><span class="istickedoff">kvps'     = map (first CI.mk) kvps</span></span>
+<span class="lineno">  774 </span>
+<span class="lineno">  775 </span>
+<span class="lineno">  776 </span>------------------------------------------------------------------------------
+<span class="lineno">  777 </span>mAX_HDRS_SIZE :: Int64
+<span class="lineno">  778 </span><span class="decl"><span class="istickedoff">mAX_HDRS_SIZE = 32768</span></span>
+<span class="lineno">  779 </span>
+<span class="lineno">  780 </span>
+<span class="lineno">  781 </span>------------------------------------------------------------------------------
+<span class="lineno">  782 </span>withTempFile :: FilePath
+<span class="lineno">  783 </span>             -&gt; String
+<span class="lineno">  784 </span>             -&gt; ((FilePath, Handle) -&gt; IO a)
+<span class="lineno">  785 </span>             -&gt; IO a
+<span class="lineno">  786 </span><span class="decl"><span class="istickedoff">withTempFile tmpl temp handler =</span>
+<span class="lineno">  787 </span><span class="spaces">    </span><span class="istickedoff">mask $ \restore -&gt; bracket make cleanup (restore . handler)</span>
+<span class="lineno">  788 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  789 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  790 </span><span class="spaces">    </span><span class="istickedoff">make           = mkstemp $ tmpl &lt;/&gt; (temp ++ &quot;XXXXXXX&quot;)</span>
+<span class="lineno">  791 </span><span class="spaces">    </span><span class="istickedoff">cleanup (fp,h) = sequence $ map gobble [hClose h, removeFile fp]</span>
+<span class="lineno">  792 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  793 </span><span class="spaces">    </span><span class="istickedoff">t :: IO z -&gt; IO (Either SomeException z)</span>
+<span class="lineno">  794 </span><span class="spaces">    </span><span class="istickedoff">t = E.try</span>
+<span class="lineno">  795 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  796 </span><span class="spaces">    </span><span class="istickedoff">gobble = void . t</span></span>
+
+</pre>
+</body>
+</html>

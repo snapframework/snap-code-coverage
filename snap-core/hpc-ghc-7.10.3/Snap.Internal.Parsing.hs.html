@@ -1,0 +1,577 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=ANSI_X3.4-1968">
+<style type="text/css">
+span.lineno { color: white; background: #aaaaaa; border-right: solid white 12px }
+span.nottickedoff { background: yellow}
+span.istickedoff { background: white }
+span.tickonlyfalse { margin: -1px; border: 1px solid #f20913; background: #f20913 }
+span.tickonlytrue  { margin: -1px; border: 1px solid #60de51; background: #60de51 }
+span.funcount { font-size: small; color: orange; z-index: 2; position: absolute; right: 20 }
+span.decl { font-weight: bold }
+span.spaces    { background: white }
+</style>
+</head>
+<body>
+<pre>
+<span class="lineno">    1 </span>{-# LANGUAGE BangPatterns      #-}
+<span class="lineno">    2 </span>{-# LANGUAGE CPP               #-}
+<span class="lineno">    3 </span>{-# LANGUAGE MagicHash         #-}
+<span class="lineno">    4 </span>{-# LANGUAGE OverloadedStrings #-}
+<span class="lineno">    5 </span>
+<span class="lineno">    6 </span>------------------------------------------------------------------------------
+<span class="lineno">    7 </span>module Snap.Internal.Parsing where
+<span class="lineno">    8 </span>------------------------------------------------------------------------------
+<span class="lineno">    9 </span>import           Control.Applicative              (Alternative ((&lt;|&gt;)), Applicative ((*&gt;), (&lt;*), pure), liftA2, (&lt;$&gt;))
+<span class="lineno">   10 </span>import           Control.Arrow                    (first, second)
+<span class="lineno">   11 </span>import           Control.Monad                    (Monad (return), MonadPlus (mzero), liftM, when)
+<span class="lineno">   12 </span>import           Data.Attoparsec.ByteString.Char8 (IResult (Done, Fail, Partial), Parser, Result, anyChar, char, choice, decimal, endOfInput, feed, inClass, isDigit, isSpace, letter_ascii, many', match, option, parse, satisfy, skipSpace, skipWhile, string, take, takeTill, takeWhile)
+<span class="lineno">   13 </span>import qualified Data.Attoparsec.ByteString.Char8 as AP
+<span class="lineno">   14 </span>import           Data.Bits                        (Bits ((.&amp;.), (.|.), unsafeShiftL))
+<span class="lineno">   15 </span>import           Data.ByteString.Builder          (Builder, byteString, char8, toLazyByteString, word8)
+<span class="lineno">   16 </span>import           Data.ByteString.Char8            (ByteString)
+<span class="lineno">   17 </span>import qualified Data.ByteString.Char8            as S
+<span class="lineno">   18 </span>import           Data.ByteString.Internal         (c2w, w2c)
+<span class="lineno">   19 </span>import qualified Data.ByteString.Lazy.Char8       as L
+<span class="lineno">   20 </span>import           Data.CaseInsensitive             (CI)
+<span class="lineno">   21 </span>import qualified Data.CaseInsensitive             as CI (mk)
+<span class="lineno">   22 </span>import           Data.Char                        (Char, intToDigit, isAlpha, isAlphaNum, isAscii, isControl, isHexDigit, ord)
+<span class="lineno">   23 </span>import           Data.Int                         (Int64)
+<span class="lineno">   24 </span>import           Data.List                        (concat, intercalate, intersperse)
+<span class="lineno">   25 </span>import           Data.Map                         (Map)
+<span class="lineno">   26 </span>import qualified Data.Map                         as Map (empty, insertWith', toList)
+<span class="lineno">   27 </span>import           Data.Maybe                       (Maybe (..), maybe)
+<span class="lineno">   28 </span>import           Data.Monoid                      (Monoid (mconcat, mempty), (&lt;&gt;))
+<span class="lineno">   29 </span>import           Data.Word                        (Word8)
+<span class="lineno">   30 </span>import           GHC.Exts                         (Int (I#), uncheckedShiftRL#, word2Int#)
+<span class="lineno">   31 </span>import           GHC.Word                         (Word8 (..))
+<span class="lineno">   32 </span>import           Prelude                          (Bool (..), Either (..), Enum (fromEnum, toEnum), Eq (..), Num (..), Ord (..), String, and, any, concatMap, elem, error, filter, flip, foldr, fst, id, map, not, otherwise, show, snd, ($), ($!), (&amp;&amp;), (++), (.), (||))
+<span class="lineno">   33 </span>import           Snap.Internal.Http.Types         (Cookie (Cookie))
+<span class="lineno">   34 </span>------------------------------------------------------------------------------
+<span class="lineno">   35 </span>
+<span class="lineno">   36 </span>
+<span class="lineno">   37 </span>------------------------------------------------------------------------------
+<span class="lineno">   38 </span>{-# INLINE fullyParse #-}
+<span class="lineno">   39 </span>fullyParse :: ByteString -&gt; Parser a -&gt; Either String a
+<span class="lineno">   40 </span><span class="decl"><span class="istickedoff">fullyParse = fullyParse' parse feed</span></span>
+<span class="lineno">   41 </span>
+<span class="lineno">   42 </span>{-# INLINE (&lt;?&gt;) #-}
+<span class="lineno">   43 </span>(&lt;?&gt;) :: Parser a -&gt; String -&gt; Parser a
+<span class="lineno">   44 </span><span class="decl"><span class="istickedoff">(&lt;?&gt;) a !b = (AP.&lt;?&gt;) a b</span></span>
+<span class="lineno">   45 </span>infix 0 &lt;?&gt;
+<span class="lineno">   46 </span>
+<span class="lineno">   47 </span>------------------------------------------------------------------------------
+<span class="lineno">   48 </span>{-# INLINE fullyParse' #-}
+<span class="lineno">   49 </span>fullyParse' :: (Parser a -&gt; ByteString -&gt; Result a)
+<span class="lineno">   50 </span>            -&gt; (Result a -&gt; ByteString -&gt; Result a)
+<span class="lineno">   51 </span>            -&gt; ByteString
+<span class="lineno">   52 </span>            -&gt; Parser a
+<span class="lineno">   53 </span>            -&gt; Either String a
+<span class="lineno">   54 </span><span class="decl"><span class="istickedoff">fullyParse' parseFunc feedFunc s p =</span>
+<span class="lineno">   55 </span><span class="spaces">    </span><span class="istickedoff">case r' of</span>
+<span class="lineno">   56 </span><span class="spaces">      </span><span class="istickedoff">(Fail _ context e) -&gt; Left $ concat [ &quot;Parsing &quot;</span>
+<span class="lineno">   57 </span><span class="spaces">                                          </span><span class="istickedoff">, intercalate &quot;/&quot; context</span>
+<span class="lineno">   58 </span><span class="spaces">                                          </span><span class="istickedoff">, &quot;: &quot;</span>
+<span class="lineno">   59 </span><span class="spaces">                                          </span><span class="istickedoff">, e</span>
+<span class="lineno">   60 </span><span class="spaces">                                          </span><span class="istickedoff">, &quot;.&quot;</span>
+<span class="lineno">   61 </span><span class="spaces">                                          </span><span class="istickedoff">]</span>
+<span class="lineno">   62 </span><span class="spaces">      </span><span class="istickedoff">(Partial _)  -&gt; Left &quot;parse failed&quot;  -- expected to be impossible</span>
+<span class="lineno">   63 </span><span class="spaces">      </span><span class="istickedoff">(Done _ x)   -&gt; Right x</span>
+<span class="lineno">   64 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   65 </span><span class="spaces">    </span><span class="istickedoff">r  = parseFunc p s</span>
+<span class="lineno">   66 </span><span class="spaces">    </span><span class="istickedoff">r' = feedFunc r &quot;&quot;</span></span>
+<span class="lineno">   67 </span>
+<span class="lineno">   68 </span>------------------------------------------------------------------------------
+<span class="lineno">   69 </span>-- Parsers for different tokens in an HTTP request.
+<span class="lineno">   70 </span>
+<span class="lineno">   71 </span>------------------------------------------------------------------------------
+<span class="lineno">   72 </span>parseNum :: Parser Int64
+<span class="lineno">   73 </span><span class="decl"><span class="istickedoff">parseNum = decimal</span></span>
+<span class="lineno">   74 </span>
+<span class="lineno">   75 </span>
+<span class="lineno">   76 </span>------------------------------------------------------------------------------
+<span class="lineno">   77 </span>untilEOL :: Parser ByteString
+<span class="lineno">   78 </span><span class="decl"><span class="istickedoff">untilEOL = takeWhile notend &lt;?&gt; &quot;untilEOL&quot;</span>
+<span class="lineno">   79 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">   80 </span><span class="spaces">    </span><span class="istickedoff">notend c = not $ c == '\r' || c == '\n'</span></span>
+<span class="lineno">   81 </span>
+<span class="lineno">   82 </span>
+<span class="lineno">   83 </span>------------------------------------------------------------------------------
+<span class="lineno">   84 </span>crlf :: Parser ByteString
+<span class="lineno">   85 </span><span class="decl"><span class="istickedoff">crlf = string &quot;\r\n&quot; &lt;?&gt; &quot;crlf&quot;</span></span>
+<span class="lineno">   86 </span>
+<span class="lineno">   87 </span>
+<span class="lineno">   88 </span>------------------------------------------------------------------------------
+<span class="lineno">   89 </span>toTable :: (Char -&gt; Bool) -&gt; (Char -&gt; Bool)
+<span class="lineno">   90 </span><span class="decl"><span class="istickedoff">toTable f = inClass $ filter f $ map w2c [0..255]</span></span>
+<span class="lineno">   91 </span>{-# INLINE toTable #-}
+<span class="lineno">   92 </span>
+<span class="lineno">   93 </span>
+<span class="lineno">   94 </span>------------------------------------------------------------------------------
+<span class="lineno">   95 </span>skipFieldChars :: Parser ()
+<span class="lineno">   96 </span><span class="decl"><span class="istickedoff">skipFieldChars = skipWhile isFieldChar</span></span>
+<span class="lineno">   97 </span>
+<span class="lineno">   98 </span>
+<span class="lineno">   99 </span>------------------------------------------------------------------------------
+<span class="lineno">  100 </span>isFieldChar :: Char -&gt; Bool
+<span class="lineno">  101 </span><span class="decl"><span class="istickedoff">isFieldChar = toTable f</span>
+<span class="lineno">  102 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  103 </span><span class="spaces">    </span><span class="istickedoff">f c = (isDigit c) || (isAlpha c) || c == '-' || c == '_'</span></span>
+<span class="lineno">  104 </span>
+<span class="lineno">  105 </span>
+<span class="lineno">  106 </span>------------------------------------------------------------------------------
+<span class="lineno">  107 </span>-- | Parser for request headers.
+<span class="lineno">  108 </span>pHeaders :: Parser [(ByteString, ByteString)]
+<span class="lineno">  109 </span><span class="decl"><span class="istickedoff">pHeaders = many' header &lt;?&gt; &quot;headers&quot;</span>
+<span class="lineno">  110 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  111 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  112 </span><span class="spaces">    </span><span class="istickedoff">slurp p = fst &lt;$&gt; match p</span>
+<span class="lineno">  113 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  114 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  115 </span><span class="spaces">    </span><span class="istickedoff">header            = {-# SCC &quot;pHeaders/header&quot; #-}</span>
+<span class="lineno">  116 </span><span class="spaces">                        </span><span class="istickedoff">liftA2 (,)</span>
+<span class="lineno">  117 </span><span class="spaces">                            </span><span class="istickedoff">fieldName</span>
+<span class="lineno">  118 </span><span class="spaces">                            </span><span class="istickedoff">(char ':' *&gt; skipSpace *&gt; contents)</span>
+<span class="lineno">  119 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  120 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  121 </span><span class="spaces">    </span><span class="istickedoff">fieldName         = {-# SCC &quot;pHeaders/fieldName&quot; #-}</span>
+<span class="lineno">  122 </span><span class="spaces">                        </span><span class="istickedoff">slurp (letter_ascii *&gt; skipFieldChars)</span>
+<span class="lineno">  123 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  124 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  125 </span><span class="spaces">    </span><span class="istickedoff">contents          = {-# SCC &quot;pHeaders/contents&quot; #-}</span>
+<span class="lineno">  126 </span><span class="spaces">                        </span><span class="istickedoff">liftA2 S.append</span>
+<span class="lineno">  127 </span><span class="spaces">                            </span><span class="istickedoff">(untilEOL &lt;* crlf)</span>
+<span class="lineno">  128 </span><span class="spaces">                            </span><span class="istickedoff">(continuation &lt;|&gt; pure S.empty)</span>
+<span class="lineno">  129 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  130 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  131 </span><span class="spaces">    </span><span class="istickedoff">isLeadingWS w     = {-# SCC &quot;pHeaders/isLeadingWS&quot; #-}</span>
+<span class="lineno">  132 </span><span class="spaces">                        </span><span class="istickedoff">w == ' ' || w == '\t'</span>
+<span class="lineno">  133 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  134 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  135 </span><span class="spaces">    </span><span class="istickedoff">leadingWhiteSpace = {-# SCC &quot;pHeaders/leadingWhiteSpace&quot; #-}</span>
+<span class="lineno">  136 </span><span class="spaces">                        </span><span class="istickedoff">skipWhile1 isLeadingWS</span>
+<span class="lineno">  137 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  138 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  139 </span><span class="spaces">    </span><span class="istickedoff">continuation      = {-# SCC &quot;pHeaders/continuation&quot; #-}</span>
+<span class="lineno">  140 </span><span class="spaces">                        </span><span class="istickedoff">liftA2 S.cons</span>
+<span class="lineno">  141 </span><span class="spaces">                               </span><span class="istickedoff">(leadingWhiteSpace *&gt; pure ' ')</span>
+<span class="lineno">  142 </span><span class="spaces">                               </span><span class="istickedoff">contents</span>
+<span class="lineno">  143 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  144 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  145 </span><span class="spaces">    </span><span class="istickedoff">skipWhile1 f = satisfy f *&gt; skipWhile f</span></span>
+<span class="lineno">  146 </span>
+<span class="lineno">  147 </span>
+<span class="lineno">  148 </span>------------------------------------------------------------------------------
+<span class="lineno">  149 </span>-- unhelpfully, the spec mentions &quot;old-style&quot; cookies that don't have quotes
+<span class="lineno">  150 </span>-- around the value. wonderful.
+<span class="lineno">  151 </span>pWord :: Parser ByteString
+<span class="lineno">  152 </span><span class="decl"><span class="istickedoff">pWord = pQuotedString &lt;|&gt; (takeWhile (/= ';'))</span></span>
+<span class="lineno">  153 </span>
+<span class="lineno">  154 </span>
+<span class="lineno">  155 </span>------------------------------------------------------------------------------
+<span class="lineno">  156 </span>pQuotedString :: Parser ByteString
+<span class="lineno">  157 </span><span class="decl"><span class="istickedoff">pQuotedString = q *&gt; quotedText &lt;* q</span>
+<span class="lineno">  158 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  159 </span><span class="spaces">    </span><span class="istickedoff">quotedText = (S.concat . L.toChunks . toLazyByteString) &lt;$&gt; f mempty</span>
+<span class="lineno">  160 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  161 </span><span class="spaces">    </span><span class="istickedoff">f soFar = do</span>
+<span class="lineno">  162 </span><span class="spaces">        </span><span class="istickedoff">t &lt;- takeWhile qdtext</span>
+<span class="lineno">  163 </span><span class="spaces">        </span><span class="istickedoff">let soFar' = soFar &lt;&gt; byteString t</span>
+<span class="lineno">  164 </span><span class="spaces">        </span><span class="istickedoff">-- RFC says that backslash only escapes for &lt;&quot;&gt;</span>
+<span class="lineno">  165 </span><span class="spaces">        </span><span class="istickedoff">choice [ string &quot;\\\&quot;&quot; *&gt; f (soFar' &lt;&gt; char8 '&quot;')</span>
+<span class="lineno">  166 </span><span class="spaces">               </span><span class="istickedoff">, pure soFar' ]</span>
+<span class="lineno">  167 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  168 </span><span class="spaces">    </span><span class="istickedoff">q      = char '&quot;'</span>
+<span class="lineno">  169 </span><span class="spaces">    </span><span class="istickedoff">qdtext = matchAll [ isRFCText, (/= '&quot;'), (/= '\\') ]</span></span>
+<span class="lineno">  170 </span>
+<span class="lineno">  171 </span>
+<span class="lineno">  172 </span>------------------------------------------------------------------------------
+<span class="lineno">  173 </span>{-# INLINE isRFCText #-}
+<span class="lineno">  174 </span>isRFCText :: Char -&gt; Bool
+<span class="lineno">  175 </span><span class="decl"><span class="istickedoff">isRFCText = not . isControl</span></span>
+<span class="lineno">  176 </span>
+<span class="lineno">  177 </span>
+<span class="lineno">  178 </span>------------------------------------------------------------------------------
+<span class="lineno">  179 </span>{-# INLINE matchAll #-}
+<span class="lineno">  180 </span>matchAll :: [ Char -&gt; Bool ] -&gt; Char -&gt; Bool
+<span class="lineno">  181 </span><span class="decl"><span class="istickedoff">matchAll x c = and $ map ($ c) x</span></span>
+<span class="lineno">  182 </span>
+<span class="lineno">  183 </span>
+<span class="lineno">  184 </span>------------------------------------------------------------------------------
+<span class="lineno">  185 </span>pAvPairs :: Parser [(ByteString, ByteString)]
+<span class="lineno">  186 </span><span class="decl"><span class="istickedoff">pAvPairs = do</span>
+<span class="lineno">  187 </span><span class="spaces">    </span><span class="istickedoff">a &lt;- pAvPair</span>
+<span class="lineno">  188 </span><span class="spaces">    </span><span class="istickedoff">b &lt;- many' (skipSpace *&gt; char ';' *&gt; skipSpace *&gt; pAvPair)</span>
+<span class="lineno">  189 </span><span class="spaces">    </span><span class="istickedoff">return $! a:b</span></span>
+<span class="lineno">  190 </span>
+<span class="lineno">  191 </span>
+<span class="lineno">  192 </span>------------------------------------------------------------------------------
+<span class="lineno">  193 </span>{-# INLINE pAvPair #-}
+<span class="lineno">  194 </span>pAvPair :: Parser (ByteString, ByteString)
+<span class="lineno">  195 </span><span class="decl"><span class="istickedoff">pAvPair = do</span>
+<span class="lineno">  196 </span><span class="spaces">    </span><span class="istickedoff">key &lt;- pToken &lt;* skipSpace</span>
+<span class="lineno">  197 </span><span class="spaces">    </span><span class="istickedoff">val &lt;- liftM trim (option &quot;&quot; $ char '=' *&gt; skipSpace *&gt; pWord)</span>
+<span class="lineno">  198 </span><span class="spaces">    </span><span class="istickedoff">return $! (key, val)</span></span>
+<span class="lineno">  199 </span>
+<span class="lineno">  200 </span>
+<span class="lineno">  201 </span>------------------------------------------------------------------------------
+<span class="lineno">  202 </span>pParameter :: Parser (ByteString, ByteString)
+<span class="lineno">  203 </span><span class="decl"><span class="istickedoff">pParameter = parser &lt;?&gt; &quot;pParameter&quot;</span>
+<span class="lineno">  204 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  205 </span><span class="spaces">    </span><span class="istickedoff">parser = do</span>
+<span class="lineno">  206 </span><span class="spaces">        </span><span class="istickedoff">key &lt;- pToken &lt;* skipSpace</span>
+<span class="lineno">  207 </span><span class="spaces">        </span><span class="istickedoff">val &lt;- liftM trim (char '=' *&gt; skipSpace *&gt; pWord)</span>
+<span class="lineno">  208 </span><span class="spaces">        </span><span class="istickedoff">return $! (trim key, val)</span></span>
+<span class="lineno">  209 </span>
+<span class="lineno">  210 </span>
+<span class="lineno">  211 </span>------------------------------------------------------------------------------
+<span class="lineno">  212 </span>{-# INLINE trim #-}
+<span class="lineno">  213 </span>trim :: ByteString -&gt; ByteString
+<span class="lineno">  214 </span><span class="decl"><span class="istickedoff">trim = snd . S.span isSpace . fst . S.spanEnd isSpace</span></span>
+<span class="lineno">  215 </span>
+<span class="lineno">  216 </span>
+<span class="lineno">  217 </span>------------------------------------------------------------------------------
+<span class="lineno">  218 </span>pValueWithParameters :: Parser (ByteString, [(CI ByteString, ByteString)])
+<span class="lineno">  219 </span><span class="decl"><span class="istickedoff">pValueWithParameters = parser &lt;?&gt; &quot;pValueWithParameters&quot;</span>
+<span class="lineno">  220 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  221 </span><span class="spaces">    </span><span class="istickedoff">parser = do</span>
+<span class="lineno">  222 </span><span class="spaces">        </span><span class="istickedoff">value  &lt;- liftM trim (skipSpace *&gt; takeWhile (/= ';'))</span>
+<span class="lineno">  223 </span><span class="spaces">        </span><span class="istickedoff">params &lt;- many' pParam</span>
+<span class="lineno">  224 </span><span class="spaces">        </span><span class="istickedoff">endOfInput</span>
+<span class="lineno">  225 </span><span class="spaces">        </span><span class="istickedoff">return (value, map (first CI.mk) params)</span>
+<span class="lineno">  226 </span><span class="spaces">    </span><span class="istickedoff">pParam = skipSpace *&gt; char ';' *&gt; skipSpace *&gt; pParameter</span></span>
+<span class="lineno">  227 </span>
+<span class="lineno">  228 </span>
+<span class="lineno">  229 </span>------------------------------------------------------------------------------
+<span class="lineno">  230 </span>pContentTypeWithParameters :: Parser ( ByteString
+<span class="lineno">  231 </span>                                     , [(CI ByteString, ByteString)] )
+<span class="lineno">  232 </span><span class="decl"><span class="istickedoff">pContentTypeWithParameters = parser &lt;?&gt; &quot;pContentTypeWithParameters&quot;</span>
+<span class="lineno">  233 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  234 </span><span class="spaces">    </span><span class="istickedoff">parser = do</span>
+<span class="lineno">  235 </span><span class="spaces">        </span><span class="istickedoff">value  &lt;- liftM trim (skipSpace *&gt; takeWhile (not . isSep))</span>
+<span class="lineno">  236 </span><span class="spaces">        </span><span class="istickedoff">params &lt;- many' (skipSpace *&gt; satisfy isSep *&gt; skipSpace *&gt; pParameter)</span>
+<span class="lineno">  237 </span><span class="spaces">        </span><span class="istickedoff">endOfInput</span>
+<span class="lineno">  238 </span><span class="spaces">        </span><span class="istickedoff">return $! (value, map (first CI.mk) params)</span>
+<span class="lineno">  239 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  240 </span><span class="spaces">    </span><span class="istickedoff">isSep c = c == ';' || c == ','</span></span>
+<span class="lineno">  241 </span>
+<span class="lineno">  242 </span>
+<span class="lineno">  243 </span>------------------------------------------------------------------------------
+<span class="lineno">  244 </span>{-# INLINE pToken #-}
+<span class="lineno">  245 </span>pToken :: Parser ByteString
+<span class="lineno">  246 </span><span class="decl"><span class="istickedoff">pToken = takeWhile isToken</span></span>
+<span class="lineno">  247 </span>
+<span class="lineno">  248 </span>
+<span class="lineno">  249 </span>------------------------------------------------------------------------------
+<span class="lineno">  250 </span>{-# INLINE isToken #-}
+<span class="lineno">  251 </span>isToken :: Char -&gt; Bool
+<span class="lineno">  252 </span><span class="decl"><span class="istickedoff">isToken = toTable f</span>
+<span class="lineno">  253 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  254 </span><span class="spaces">    </span><span class="istickedoff">f = matchAll [ isAscii</span>
+<span class="lineno">  255 </span><span class="spaces">                 </span><span class="istickedoff">, not . isControl</span>
+<span class="lineno">  256 </span><span class="spaces">                 </span><span class="istickedoff">, not . isSpace</span>
+<span class="lineno">  257 </span><span class="spaces">                 </span><span class="istickedoff">, not . flip elem [ '(', ')', '&lt;', '&gt;', '@', ',', ';'</span>
+<span class="lineno">  258 </span><span class="spaces">                                   </span><span class="istickedoff">, ':', '\\', '\&quot;', '/', '[', ']'</span>
+<span class="lineno">  259 </span><span class="spaces">                                   </span><span class="istickedoff">, '?', '=', '{', '}' ]</span>
+<span class="lineno">  260 </span><span class="spaces">                 </span><span class="istickedoff">]</span></span>
+<span class="lineno">  261 </span>
+<span class="lineno">  262 </span>
+<span class="lineno">  263 </span>                              ------------------
+<span class="lineno">  264 </span>                              -- Url encoding --
+<span class="lineno">  265 </span>                              ------------------
+<span class="lineno">  266 </span>
+<span class="lineno">  267 </span>------------------------------------------------------------------------------
+<span class="lineno">  268 </span>{-# INLINE parseToCompletion #-}
+<span class="lineno">  269 </span>parseToCompletion :: Parser a -&gt; ByteString -&gt; Maybe a
+<span class="lineno">  270 </span><span class="decl"><span class="istickedoff">parseToCompletion p s = toResult $ finish r</span>
+<span class="lineno">  271 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  272 </span><span class="spaces">    </span><span class="istickedoff">r = parse p s</span>
+<span class="lineno">  273 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  274 </span><span class="spaces">    </span><span class="istickedoff">toResult (Done _ c) = Just c</span>
+<span class="lineno">  275 </span><span class="spaces">    </span><span class="istickedoff">toResult _          = Nothing</span></span>
+<span class="lineno">  276 </span>
+<span class="lineno">  277 </span>
+<span class="lineno">  278 </span>------------------------------------------------------------------------------
+<span class="lineno">  279 </span>type DList a = [a] -&gt; [a]
+<span class="lineno">  280 </span>
+<span class="lineno">  281 </span>pUrlEscaped :: Parser ByteString
+<span class="lineno">  282 </span><span class="decl"><span class="istickedoff">pUrlEscaped = do</span>
+<span class="lineno">  283 </span><span class="spaces">    </span><span class="istickedoff">sq &lt;- nextChunk id</span>
+<span class="lineno">  284 </span><span class="spaces">    </span><span class="istickedoff">return $! S.concat $ sq []</span>
+<span class="lineno">  285 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  286 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  287 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  288 </span><span class="spaces">    </span><span class="istickedoff">nextChunk :: DList ByteString -&gt; Parser (DList ByteString)</span>
+<span class="lineno">  289 </span><span class="spaces">    </span><span class="istickedoff">nextChunk !s = (endOfInput *&gt; pure s) &lt;|&gt; do</span>
+<span class="lineno">  290 </span><span class="spaces">        </span><span class="istickedoff">c &lt;- anyChar</span>
+<span class="lineno">  291 </span><span class="spaces">        </span><span class="istickedoff">case c of</span>
+<span class="lineno">  292 </span><span class="spaces">          </span><span class="istickedoff">'+' -&gt; plusSpace s</span>
+<span class="lineno">  293 </span><span class="spaces">          </span><span class="istickedoff">'%' -&gt; percentEncoded s</span>
+<span class="lineno">  294 </span><span class="spaces">          </span><span class="istickedoff">_   -&gt; unEncoded c s</span>
+<span class="lineno">  295 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  296 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  297 </span><span class="spaces">    </span><span class="istickedoff">percentEncoded :: DList ByteString -&gt; Parser (DList ByteString)</span>
+<span class="lineno">  298 </span><span class="spaces">    </span><span class="istickedoff">percentEncoded !l = do</span>
+<span class="lineno">  299 </span><span class="spaces">        </span><span class="istickedoff">hx &lt;- take 2</span>
+<span class="lineno">  300 </span><span class="spaces">        </span><span class="istickedoff">when (S.length hx /= 2 || (not $ S.all isHexDigit hx)) $</span>
+<span class="lineno">  301 </span><span class="spaces">             </span><span class="istickedoff">mzero</span>
+<span class="lineno">  302 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  303 </span><span class="spaces">        </span><span class="istickedoff">let code = w2c ((unsafeFromHex hx) :: Word8)</span>
+<span class="lineno">  304 </span><span class="spaces">        </span><span class="istickedoff">nextChunk $ l . ((S.singleton code) :)</span>
+<span class="lineno">  305 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  306 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  307 </span><span class="spaces">    </span><span class="istickedoff">unEncoded :: Char -&gt; DList ByteString -&gt; Parser (DList ByteString)</span>
+<span class="lineno">  308 </span><span class="spaces">    </span><span class="istickedoff">unEncoded !c !l' = do</span>
+<span class="lineno">  309 </span><span class="spaces">        </span><span class="istickedoff">let l = l' . ((S.singleton c) :)</span>
+<span class="lineno">  310 </span><span class="spaces">        </span><span class="istickedoff">bs   &lt;- takeTill (flip elem ['%', '+'])</span>
+<span class="lineno">  311 </span><span class="spaces">        </span><span class="istickedoff">if S.null bs</span>
+<span class="lineno">  312 </span><span class="spaces">          </span><span class="istickedoff">then nextChunk l</span>
+<span class="lineno">  313 </span><span class="spaces">          </span><span class="istickedoff">else nextChunk $ l . (bs :)</span>
+<span class="lineno">  314 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  315 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  316 </span><span class="spaces">    </span><span class="istickedoff">plusSpace :: DList ByteString -&gt; Parser (DList ByteString)</span>
+<span class="lineno">  317 </span><span class="spaces">    </span><span class="istickedoff">plusSpace l = nextChunk (l . ((S.singleton ' ') :))</span></span>
+<span class="lineno">  318 </span>
+<span class="lineno">  319 </span>
+<span class="lineno">  320 </span>------------------------------------------------------------------------------
+<span class="lineno">  321 </span>-- &quot;...Only alphanumerics [0-9a-zA-Z], the special characters &quot;$-_.+!*'(),&quot;
+<span class="lineno">  322 </span>-- [not including the quotes - ed], and reserved characters used for their
+<span class="lineno">  323 </span>-- reserved purposes may be used unencoded within a URL.&quot;
+<span class="lineno">  324 </span>
+<span class="lineno">  325 </span>
+<span class="lineno">  326 </span>
+<span class="lineno">  327 </span>
+<span class="lineno">  328 </span>------------------------------------------------------------------------------
+<span class="lineno">  329 </span>-- | Decode an URL-escaped string (see
+<span class="lineno">  330 </span>-- &lt;http://tools.ietf.org/html/rfc2396.html#section-2.4&gt;)
+<span class="lineno">  331 </span>--
+<span class="lineno">  332 </span>-- Example:
+<span class="lineno">  333 </span>--
+<span class="lineno">  334 </span>-- @
+<span class="lineno">  335 </span>-- ghci&gt; 'urlDecode' &quot;1+attoparsec+%7e%3d+3+*+10%5e-2+meters&quot;
+<span class="lineno">  336 </span>-- Just &quot;1 attoparsec ~= 3 * 10^-2 meters&quot;
+<span class="lineno">  337 </span>-- @
+<span class="lineno">  338 </span>urlDecode :: ByteString -&gt; Maybe ByteString
+<span class="lineno">  339 </span><span class="decl"><span class="istickedoff">urlDecode = parseToCompletion pUrlEscaped</span></span>
+<span class="lineno">  340 </span>{-# INLINE urlDecode #-}
+<span class="lineno">  341 </span>
+<span class="lineno">  342 </span>
+<span class="lineno">  343 </span>------------------------------------------------------------------------------
+<span class="lineno">  344 </span>-- | URL-escape a string (see
+<span class="lineno">  345 </span>-- &lt;http://tools.ietf.org/html/rfc2396.html#section-2.4&gt;)
+<span class="lineno">  346 </span>--
+<span class="lineno">  347 </span>-- Example:
+<span class="lineno">  348 </span>--
+<span class="lineno">  349 </span>-- @
+<span class="lineno">  350 </span>-- ghci&gt; 'urlEncode' &quot;1 attoparsec ~= 3 * 10^-2 meters&quot;
+<span class="lineno">  351 </span>-- &quot;1+attoparsec+%7e%3d+3+*+10%5e-2+meters&quot;
+<span class="lineno">  352 </span>-- @
+<span class="lineno">  353 </span>urlEncode :: ByteString -&gt; ByteString
+<span class="lineno">  354 </span><span class="decl"><span class="istickedoff">urlEncode = S.concat . L.toChunks . toLazyByteString . urlEncodeBuilder</span></span>
+<span class="lineno">  355 </span>{-# INLINE urlEncode #-}
+<span class="lineno">  356 </span>
+<span class="lineno">  357 </span>
+<span class="lineno">  358 </span>------------------------------------------------------------------------------
+<span class="lineno">  359 </span>-- | URL-escape a string (see
+<span class="lineno">  360 </span>-- &lt;http://tools.ietf.org/html/rfc2396.html#section-2.4&gt;) into a 'Builder'.
+<span class="lineno">  361 </span>--
+<span class="lineno">  362 </span>-- Example:
+<span class="lineno">  363 </span>--
+<span class="lineno">  364 </span>-- @
+<span class="lineno">  365 </span>-- ghci&gt; import &quot;Data.ByteString.Builder&quot;
+<span class="lineno">  366 </span>-- ghci&gt; 'toLazyByteString' . 'urlEncodeBuilder' $ &quot;1 attoparsec ~= 3 * 10^-2 meters&quot;
+<span class="lineno">  367 </span>-- &quot;1+attoparsec+%7e%3d+3+*+10%5e-2+meters&quot;
+<span class="lineno">  368 </span>-- @
+<span class="lineno">  369 </span>urlEncodeBuilder :: ByteString -&gt; Builder
+<span class="lineno">  370 </span><span class="decl"><span class="istickedoff">urlEncodeBuilder = go mempty</span>
+<span class="lineno">  371 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  372 </span><span class="spaces">    </span><span class="istickedoff">go !b !s = maybe b' esc (S.uncons y)</span>
+<span class="lineno">  373 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  374 </span><span class="spaces">        </span><span class="istickedoff">(x,y)     = S.span urlEncodeClean s</span>
+<span class="lineno">  375 </span><span class="spaces">        </span><span class="istickedoff">b'        = b &lt;&gt; byteString x</span>
+<span class="lineno">  376 </span><span class="spaces">        </span><span class="istickedoff">esc (c,r) = let b'' = if c == ' '</span>
+<span class="lineno">  377 </span><span class="spaces">                                </span><span class="istickedoff">then b' &lt;&gt; char8 '+'</span>
+<span class="lineno">  378 </span><span class="spaces">                                </span><span class="istickedoff">else b' &lt;&gt; hexd c</span>
+<span class="lineno">  379 </span><span class="spaces">                    </span><span class="istickedoff">in go b'' r</span></span>
+<span class="lineno">  380 </span>
+<span class="lineno">  381 </span>
+<span class="lineno">  382 </span>------------------------------------------------------------------------------
+<span class="lineno">  383 </span>urlEncodeClean :: Char -&gt; Bool
+<span class="lineno">  384 </span><span class="decl"><span class="istickedoff">urlEncodeClean = toTable f</span>
+<span class="lineno">  385 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  386 </span><span class="spaces">    </span><span class="istickedoff">f c = any ($ c) [\c' -&gt; isAscii c' &amp;&amp; isAlphaNum c'</span>
+<span class="lineno">  387 </span><span class="spaces">                    </span><span class="istickedoff">, flip elem [ '$', '_', '-', '.', '!'</span>
+<span class="lineno">  388 </span><span class="spaces">                                </span><span class="istickedoff">, '*' , '\'', '(', ')', ',' ]]</span></span>
+<span class="lineno">  389 </span>
+<span class="lineno">  390 </span>
+<span class="lineno">  391 </span>------------------------------------------------------------------------------
+<span class="lineno">  392 </span>hexd :: Char -&gt; Builder
+<span class="lineno">  393 </span><span class="decl"><span class="istickedoff">hexd c0 = char8 '%' &lt;&gt; word8 hi &lt;&gt; word8 low</span>
+<span class="lineno">  394 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  395 </span><span class="spaces">    </span><span class="istickedoff">!c        = c2w c0</span>
+<span class="lineno">  396 </span><span class="spaces">    </span><span class="istickedoff">toDigit   = c2w . intToDigit</span>
+<span class="lineno">  397 </span><span class="spaces">    </span><span class="istickedoff">!low      = toDigit $ fromEnum $ c .&amp;. 0xf</span>
+<span class="lineno">  398 </span><span class="spaces">    </span><span class="istickedoff">!hi       = toDigit $ (c .&amp;. 0xf0) `shiftr` 4</span>
+<span class="lineno">  399 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  400 </span><span class="spaces">    </span><span class="istickedoff">shiftr (W8# a#) (I# b#) = I# (word2Int# (uncheckedShiftRL# a# b#))</span></span>
+<span class="lineno">  401 </span>
+<span class="lineno">  402 </span>
+<span class="lineno">  403 </span>------------------------------------------------------------------------------
+<span class="lineno">  404 </span>finish :: Result a -&gt; Result a
+<span class="lineno">  405 </span><span class="decl"><span class="istickedoff">finish (Partial f) = flip feed &quot;&quot; $ f &quot;&quot;</span>
+<span class="lineno">  406 </span><span class="spaces"></span><span class="istickedoff">finish x           = x</span></span>
+<span class="lineno">  407 </span>
+<span class="lineno">  408 </span>
+<span class="lineno">  409 </span>                    ---------------------------------------
+<span class="lineno">  410 </span>                    -- application/x-www-form-urlencoded --
+<span class="lineno">  411 </span>                    ---------------------------------------
+<span class="lineno">  412 </span>
+<span class="lineno">  413 </span>------------------------------------------------------------------------------
+<span class="lineno">  414 </span>-- | Parse a string encoded in @application/x-www-form-urlencoded@ &lt; http://en.wikipedia.org/wiki/POST_%28HTTP%29#Use_for_submitting_web_forms format&gt;.
+<span class="lineno">  415 </span>--
+<span class="lineno">  416 </span>-- Example:
+<span class="lineno">  417 </span>--
+<span class="lineno">  418 </span>-- @
+<span class="lineno">  419 </span>-- ghci&gt; 'parseUrlEncoded' &quot;Name=John+Doe&amp;Name=Jane+Doe&amp;Age=23&amp;Formula=a+%2B+b+%3D%3D+13%25%21&quot;
+<span class="lineno">  420 </span>-- 'Data.Map.fromList' [(&quot;Age&quot;,[&quot;23&quot;]),(&quot;Formula&quot;,[&quot;a + b == 13%!&quot;]),(&quot;Name&quot;,[&quot;John Doe&quot;,&quot;Jane Doe&quot;])]
+<span class="lineno">  421 </span>-- @
+<span class="lineno">  422 </span>parseUrlEncoded :: ByteString -&gt; Map ByteString [ByteString]
+<span class="lineno">  423 </span><span class="decl"><span class="istickedoff">parseUrlEncoded s = foldr ins Map.empty decoded</span>
+<span class="lineno">  424 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  425 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  426 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  427 </span><span class="spaces">    </span><span class="istickedoff">ins (!k,v) !m = Map.insertWith' (++) k [v] m</span>
+<span class="lineno">  428 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  429 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  430 </span><span class="spaces">    </span><span class="istickedoff">parts :: [(ByteString,ByteString)]</span>
+<span class="lineno">  431 </span><span class="spaces">    </span><span class="istickedoff">parts = map breakApart $</span>
+<span class="lineno">  432 </span><span class="spaces">            </span><span class="istickedoff">S.splitWith (\c -&gt; c == '&amp;' || c == ';') s</span>
+<span class="lineno">  433 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  434 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  435 </span><span class="spaces">    </span><span class="istickedoff">breakApart = (second (S.drop 1)) . S.break (== '=')</span>
+<span class="lineno">  436 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  437 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  438 </span><span class="spaces">    </span><span class="istickedoff">urldecode = parseToCompletion pUrlEscaped</span>
+<span class="lineno">  439 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  440 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  441 </span><span class="spaces">    </span><span class="istickedoff">decodeOne (a,b) = do</span>
+<span class="lineno">  442 </span><span class="spaces">        </span><span class="istickedoff">!a' &lt;- urldecode a</span>
+<span class="lineno">  443 </span><span class="spaces">        </span><span class="istickedoff">!b' &lt;- urldecode b</span>
+<span class="lineno">  444 </span><span class="spaces">        </span><span class="istickedoff">return $! (a',b')</span>
+<span class="lineno">  445 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  446 </span><span class="spaces">    </span><span class="istickedoff">--------------------------------------------------------------------------</span>
+<span class="lineno">  447 </span><span class="spaces">    </span><span class="istickedoff">decoded = go id parts</span>
+<span class="lineno">  448 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  449 </span><span class="spaces">        </span><span class="istickedoff">go !dl []     = dl []</span>
+<span class="lineno">  450 </span><span class="spaces">        </span><span class="istickedoff">go !dl (x:xs) = maybe (go dl xs)</span>
+<span class="lineno">  451 </span><span class="spaces">                              </span><span class="istickedoff">(\p -&gt; go (dl . (p:)) xs)</span>
+<span class="lineno">  452 </span><span class="spaces">                              </span><span class="istickedoff">(decodeOne x)</span></span>
+<span class="lineno">  453 </span>
+<span class="lineno">  454 </span>
+<span class="lineno">  455 </span>------------------------------------------------------------------------------
+<span class="lineno">  456 </span>-- | Like 'printUrlEncoded', but produces a 'Builder' instead of a
+<span class="lineno">  457 </span>-- 'ByteString'. Useful for constructing a large string efficiently in
+<span class="lineno">  458 </span>-- a single step.
+<span class="lineno">  459 </span>--
+<span class="lineno">  460 </span>-- Example:
+<span class="lineno">  461 </span>--
+<span class="lineno">  462 </span>-- @
+<span class="lineno">  463 </span>-- ghci&gt; import &quot;Data.Map&quot;
+<span class="lineno">  464 </span>-- ghci&gt; import &quot;Data.Monoid&quot;
+<span class="lineno">  465 </span>-- ghci&gt; import &quot;Data.ByteString.Builder&quot;
+<span class="lineno">  466 </span>-- ghci&gt; let bldr = 'buildUrlEncoded' ('Data.Map.fromList' [(&quot;Name&quot;, [&quot;John Doe&quot;]), (&quot;Age&quot;, [&quot;23&quot;])])
+<span class="lineno">  467 </span>-- ghci&gt; 'toLazyByteString' $ 'byteString' &quot;http://example.com/script?&quot; &lt;&gt; bldr
+<span class="lineno">  468 </span>-- &quot;http://example.com/script?Age=23&amp;Name=John+Doe&quot;
+<span class="lineno">  469 </span>-- @
+<span class="lineno">  470 </span>buildUrlEncoded :: Map ByteString [ByteString] -&gt; Builder
+<span class="lineno">  471 </span><span class="decl"><span class="istickedoff">buildUrlEncoded m = mconcat builders</span>
+<span class="lineno">  472 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  473 </span><span class="spaces">    </span><span class="istickedoff">builders        = intersperse (char8 '&amp;') $</span>
+<span class="lineno">  474 </span><span class="spaces">                      </span><span class="istickedoff">concatMap encodeVS $ Map.toList m</span>
+<span class="lineno">  475 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  476 </span><span class="spaces">    </span><span class="istickedoff">encodeVS (k,vs) = map (encodeOne k) vs</span>
+<span class="lineno">  477 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  478 </span><span class="spaces">    </span><span class="istickedoff">encodeOne k v   = mconcat [ urlEncodeBuilder k</span>
+<span class="lineno">  479 </span><span class="spaces">                              </span><span class="istickedoff">, char8 '='</span>
+<span class="lineno">  480 </span><span class="spaces">                              </span><span class="istickedoff">, urlEncodeBuilder v ]</span></span>
+<span class="lineno">  481 </span>
+<span class="lineno">  482 </span>
+<span class="lineno">  483 </span>------------------------------------------------------------------------------
+<span class="lineno">  484 </span>-- | Given a collection of key-value pairs with possibly duplicate
+<span class="lineno">  485 </span>-- keys (represented as a 'Data.Map.Map'), construct a string in
+<span class="lineno">  486 </span>-- @application/x-www-form-urlencoded@ format.
+<span class="lineno">  487 </span>--
+<span class="lineno">  488 </span>-- Example:
+<span class="lineno">  489 </span>--
+<span class="lineno">  490 </span>-- @
+<span class="lineno">  491 </span>-- ghci&gt; 'printUrlEncoded' ('Data.Map.fromList' [(&quot;Name&quot;, [&quot;John Doe&quot;]), (&quot;Age&quot;, [&quot;23&quot;])])
+<span class="lineno">  492 </span>-- &quot;Age=23&amp;Name=John+Doe&quot;
+<span class="lineno">  493 </span>-- @
+<span class="lineno">  494 </span>printUrlEncoded :: Map ByteString [ByteString] -&gt; ByteString
+<span class="lineno">  495 </span><span class="decl"><span class="istickedoff">printUrlEncoded = S.concat . L.toChunks . toLazyByteString . buildUrlEncoded</span></span>
+<span class="lineno">  496 </span>
+<span class="lineno">  497 </span>
+<span class="lineno">  498 </span>                             --------------------
+<span class="lineno">  499 </span>                             -- Cookie parsing --
+<span class="lineno">  500 </span>                             --------------------
+<span class="lineno">  501 </span>
+<span class="lineno">  502 </span>------------------------------------------------------------------------------
+<span class="lineno">  503 </span>-- these definitions try to mirror RFC-2068 (the HTTP/1.1 spec) and RFC-2109
+<span class="lineno">  504 </span>-- (cookie spec): please point out any errors!
+<span class="lineno">  505 </span>------------------------------------------------------------------------------
+<span class="lineno">  506 </span>pCookies :: Parser [Cookie]
+<span class="lineno">  507 </span><span class="decl"><span class="istickedoff">pCookies = do</span>
+<span class="lineno">  508 </span><span class="spaces">    </span><span class="istickedoff">-- grab kvps and turn to strict bytestrings</span>
+<span class="lineno">  509 </span><span class="spaces">    </span><span class="istickedoff">kvps &lt;- pAvPairs</span>
+<span class="lineno">  510 </span><span class="spaces">    </span><span class="istickedoff">return $! map toCookie $ filter (not . S.isPrefixOf &quot;$&quot; . fst) kvps</span>
+<span class="lineno">  511 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  512 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  513 </span><span class="spaces">    </span><span class="istickedoff">toCookie (nm,val) = Cookie nm val Nothing Nothing Nothing False False</span></span>
+<span class="lineno">  514 </span>
+<span class="lineno">  515 </span>
+<span class="lineno">  516 </span>------------------------------------------------------------------------------
+<span class="lineno">  517 </span>parseCookie :: ByteString -&gt; Maybe [Cookie]
+<span class="lineno">  518 </span><span class="decl"><span class="istickedoff">parseCookie = parseToCompletion pCookies</span></span>
+<span class="lineno">  519 </span>
+<span class="lineno">  520 </span>
+<span class="lineno">  521 </span>                            -----------------------
+<span class="lineno">  522 </span>                            -- utility functions --
+<span class="lineno">  523 </span>                            -----------------------
+<span class="lineno">  524 </span>
+<span class="lineno">  525 </span>------------------------------------------------------------------------------
+<span class="lineno">  526 </span>unsafeFromHex :: (Enum a, Num a, Bits a) =&gt; ByteString -&gt; a
+<span class="lineno">  527 </span><span class="decl"><span class="istickedoff">unsafeFromHex = S.foldl' f 0</span>
+<span class="lineno">  528 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  529 </span><span class="spaces"></span><span class="istickedoff">#if MIN_VERSION_base(4,5,0)</span>
+<span class="lineno">  530 </span><span class="spaces">    </span><span class="istickedoff">sl = unsafeShiftL</span>
+<span class="lineno">  531 </span><span class="spaces"></span><span class="istickedoff">#else</span>
+<span class="lineno">  532 </span><span class="spaces">    </span><span class="istickedoff">sl = shiftL</span>
+<span class="lineno">  533 </span><span class="spaces"></span><span class="istickedoff">#endif</span>
+<span class="lineno">  534 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  535 </span><span class="spaces">    </span><span class="istickedoff">f !cnt !i = sl cnt 4 .|. nybble i</span>
+<span class="lineno">  536 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  537 </span><span class="spaces">    </span><span class="istickedoff">nybble c | c &gt;= '0' &amp;&amp; c &lt;= '9' = toEnum $! fromEnum c - fromEnum '0'</span>
+<span class="lineno">  538 </span><span class="spaces">             </span><span class="istickedoff">| c &gt;= 'a' &amp;&amp; c &lt;= 'f' = toEnum $! 10 + fromEnum c - fromEnum 'a'</span>
+<span class="lineno">  539 </span><span class="spaces">             </span><span class="istickedoff">| c &gt;= 'A' &amp;&amp; c &lt;= 'F' = toEnum $! 10 + fromEnum c - fromEnum 'A'</span>
+<span class="lineno">  540 </span><span class="spaces">             </span><span class="istickedoff">| <span class="tickonlytrue">otherwise</span>            = error $ &quot;bad hex digit: &quot; ++ show c</span></span>
+<span class="lineno">  541 </span>{-# INLINE unsafeFromHex #-}
+<span class="lineno">  542 </span>
+<span class="lineno">  543 </span>
+<span class="lineno">  544 </span>------------------------------------------------------------------------------
+<span class="lineno">  545 </span>-- Note: only works for nonnegative naturals
+<span class="lineno">  546 </span>unsafeFromNat :: (Enum a, Num a, Bits a) =&gt; ByteString -&gt; a
+<span class="lineno">  547 </span><span class="decl"><span class="istickedoff">unsafeFromNat = S.foldl' f 0</span>
+<span class="lineno">  548 </span><span class="spaces">  </span><span class="istickedoff">where</span>
+<span class="lineno">  549 </span><span class="spaces">    </span><span class="istickedoff">zero = ord '0'</span>
+<span class="lineno">  550 </span><span class="spaces">    </span><span class="istickedoff">f !cnt !i = cnt * 10 + toEnum (digitToInt i)</span>
+<span class="lineno">  551 </span><span class="spaces"></span><span class="istickedoff"></span>
+<span class="lineno">  552 </span><span class="spaces">    </span><span class="istickedoff">digitToInt c = if d &gt;= 0 &amp;&amp; d &lt;= 9</span>
+<span class="lineno">  553 </span><span class="spaces">                     </span><span class="istickedoff">then d</span>
+<span class="lineno">  554 </span><span class="spaces">                     </span><span class="istickedoff">else error $ &quot;bad digit: '&quot; ++ [c] ++ &quot;'&quot;</span>
+<span class="lineno">  555 </span><span class="spaces">      </span><span class="istickedoff">where</span>
+<span class="lineno">  556 </span><span class="spaces">        </span><span class="istickedoff">!d = ord c - zero</span></span>
+<span class="lineno">  557 </span>{-# INLINE unsafeFromNat #-}
+
+</pre>
+</body>
+</html>
